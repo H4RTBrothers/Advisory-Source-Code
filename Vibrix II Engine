@@ -1,0 +1,968 @@
+//+------------------------------------------------------------------+
+//|                                            VibrixGroupEA_BTC.mq5 |
+//|                        MQL5 - BTCUSD intraday scalper             |
+//+------------------------------------------------------------------+
+#property copyright "Vibrix EA"
+#property link      ""
+#property version   "2.10"
+#property strict
+#property description "Vibrix Group EA - intraday scalper."
+#property description "v2.10: symmetric MACD signal + optional Stoch/MACD-cross/ADX filters."
+
+#include <Trade\Trade.mqh>
+#include <Trade\SymbolInfo.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\OrderInfo.mqh>
+#include <Trade\AccountInfo.mqh>
+
+CTrade         trade;
+CSymbolInfo    symInfo;
+CPositionInfo  positionInfo;
+COrderInfo     orderInfo;
+
+//+------------------------------------------------------------------+
+//| Input parameters                                                  |
+//+------------------------------------------------------------------+
+input string   EAName                     = "Vibrix Group EA - BTC";
+input ulong    InpMagicNumber             = 2024;
+input string   InpTradeComment            = "Vibrix 2.1";
+input int      StartTime                  = 0;
+input int      EndTime                    = 23;
+input ENUM_TIMEFRAMES TimeFrame           = PERIOD_M15;
+
+input group    "=== Order types enabled ==="
+input bool     BUY_market_lowRisk          = true;
+input bool     SELL_market_lowRisk         = true;
+input bool     BUY_market                  = true;
+input bool     SELL_market                 = true;
+input bool     BUY_stop                    = true;
+input bool     SELL_stop                   = true;
+input bool     BUY_limit                   = true;
+input bool     SELL_limit                  = true;
+input bool     SELL_limit_StrictFilter     = false;
+input bool     SkipIfPendingExists         = true;
+
+input group    "=== Lots ==="
+input double   Lots                        = 0.01;
+input double   AutoLot                     = 0;
+
+input group    "=== ATR distance (overrides points/pips when ON) ==="
+input bool     UseATR_Distance             = false;
+input int      ATR_Period                  = 14;
+input double   ATR_SL_Multiplier           = 2.0;
+input double   ATR_Trail_Multiplier        = 1.5;
+input double   ATR_DeltaStop_Multiplier    = 1.5;
+input double   ATR_DeltaLimit_Multiplier   = 1.0;
+
+input group    "=== Trailing Stop (points/pips fallback) ==="
+input int      TrailingStop_Points         = 5000;
+input int      TrailingStep_Points         = 1000;
+input int      TrailingStop_Pips           = 0;
+input int      TrailingStep_Pips           = 0;
+
+input group    "=== Breakeven + Grid Trailing ==="
+input bool     UseBreakeven                = true;
+input int      BreakevenTrigger_Pips       = 300;
+input int      BreakevenOffset_Pips        = 30;
+input bool     UseGridTrailing             = true;
+input int      GridStep_Pips               = 200;
+input int      GridLock_Pips               = 100;
+
+input group    "=== Take Profit ==="
+input double   TakeProfitPercentOfBalance  = 0.5;
+
+input group    "=== SL / Pending distances (points/pips fallback) ==="
+input int      MaxStopLoss_Points          = 40000;
+input int      MinSL_Points                = 10000;
+input int      DeltaStop_Points            = 30000;
+input int      DeltaLimit_Points           = 15000;
+input int      MaxStopLoss_Pips            = 0;
+input int      MinSL_Pips                  = 0;
+input int      DeltaStop_Pips              = 0;
+input int      DeltaLimit_Pips             = 0;
+
+input group    "=== Drawdown protection ==="
+input double   MaxDrawdownPercent          = 10.0;
+input double   ResumeRecoveryPercent       = 50.0;
+
+input group    "=== Equity / money protection ==="
+input double   TakeProfitPercent           = 2;
+input double   All_Prof                    = 50;
+input double   All_Loss                    = 200;
+
+input group    "=== Indicators (core signal) ==="
+input int      Ma_period                   = 10;
+input int      Bb_period                   = 17;
+input int      Fast_emaperiod              = 10;
+input int      Slow_emaperiod              = 19;
+input int      Signal_smaperiod            = 13;
+input int      Rsi_period                  = 12;
+
+input group    "=== Confirmation filters (ALL required if enabled) ==="
+input bool     UseFilter_Stoch             = false;          // Stoch crossover in OB/OS
+input int      Stoch_KPeriod               = 14;
+input int      Stoch_DPeriod               = 3;
+input int      Stoch_Slowing               = 3;
+input int      Stoch_Oversold              = 20;
+input int      Stoch_Overbought            = 80;
+
+input bool     UseFilter_MACDCross         = false;          // MACD main vs signal cross
+input bool     UseFilter_ADX               = false;          // ADX > threshold
+input int      ADX_Period                  = 14;
+input double   ADX_Threshold               = 22.0;
+
+input bool     LogBlockedSignals           = false;          // print why a signal was filtered
+
+input group    "=== Misc ==="
+input ulong    SlippagePoints              = 50;
+input bool     UseClosedCandle             = true;
+input bool     VerboseLogs                 = true;
+
+//+------------------------------------------------------------------+
+//| Globals                                                           |
+//+------------------------------------------------------------------+
+int      maHandle      = INVALID_HANDLE;
+int      bbHandle      = INVALID_HANDLE;
+int      macdHandle    = INVALID_HANDLE;
+int      rsiHandle     = INVALID_HANDLE;
+int      atrHandle     = INVALID_HANDLE;
+int      stochHandle   = INVALID_HANDLE;
+int      adxHandle     = INVALID_HANDLE;
+
+int      barsCount     = 0;
+int      pipMultiplier = 1;
+
+int      effMaxStopLossPts, effMinSLPts, effDeltaStopPts, effDeltaLimitPts;
+int      effTrailingStopPts, effTrailingStepPts;
+double   priceMaxStopLoss, priceMinSL, priceDeltaStop, priceDeltaLimit;
+
+int      effStartTime, effEndTime;
+int      effMaPeriod, effBbPeriod, effFastEma, effSlowEma, effSignalSma, effRsiPeriod;
+
+double   initBalance        = 0.0;
+double   peakEquity         = 0.0;
+bool     drawdownPaused     = false;
+double   drawdownPauseEquity = 0.0;
+
+bool     hasLowRiskBuy      = false;
+bool     hasLowRiskSell     = false;
+
+const int LookbackBars = 10;
+
+//+------------------------------------------------------------------+
+int DetectPipMultiplier()
+{
+   int d = _Digits;
+   if(d == 5 || d == 3) return 10;
+   if(d == 2)           return 10;
+   return 1;
+}
+
+int ResolveDistance(int pipValue, int pointValue)
+{
+   if(pipValue > 0) return pipValue * pipMultiplier;
+   return pointValue;
+}
+
+double PointsToPrice(int points) { return points * _Point; }
+int    PipsToPoints(int pips)    { return pips * pipMultiplier; }
+double PipsToPrice(int pips)     { return PipsToPoints(pips) * _Point; }
+
+//+------------------------------------------------------------------+
+double GetATR(int shift = 1)
+{
+   double tmp[1];
+   if(CopyBuffer(atrHandle, 0, shift, 1, tmp) != 1) return 0;
+   return tmp[0];
+}
+
+double LastBarRange()
+{
+   double hi[1], lo[1];
+   if(CopyHigh(_Symbol, TimeFrame, 1, 1, hi) != 1) return 0;
+   if(CopyLow(_Symbol, TimeFrame, 1, 1, lo) != 1) return 0;
+   return MathMax(0.0, hi[0] - lo[0]);
+}
+
+double DynamicDistance(double atrMultiplier)
+{
+   double atr   = GetATR(1);
+   double range = LastBarRange();
+   double d = MathMax(atr * atrMultiplier, range);
+   if(d <= 0) d = _Point * 100;
+   return d;
+}
+
+double ComputeTakeProfitPrice(double entryPrice, bool isBuy, double lot)
+{
+   if(TakeProfitPercentOfBalance <= 0 || lot <= 0) return 0.0;
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double targetProfit = balance * TakeProfitPercentOfBalance / 100.0;
+   double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+   if(contractSize <= 0) contractSize = 1.0;
+   double pointValue = contractSize * _Point;
+   double priceDistance = targetProfit / (lot * pointValue);
+   priceDistance = MathMax(priceDistance, _Point * 10);
+   return isBuy ? entryPrice + priceDistance : entryPrice - priceDistance;
+}
+
+//+------------------------------------------------------------------+
+//| Drawdown                                                         |
+//+------------------------------------------------------------------+
+void UpdateDrawdownState()
+{
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(eq > peakEquity) peakEquity = eq;
+   if(MaxDrawdownPercent <= 0 || peakEquity <= 0) return;
+
+   double ddPct = (peakEquity - eq) / peakEquity * 100.0;
+
+   if(!drawdownPaused && ddPct >= MaxDrawdownPercent)
+   {
+      drawdownPaused = true;
+      drawdownPauseEquity = eq;
+      PrintFormat("[DD-PAUSE] Equity %.2f peak %.2f DD %.2f%% >= %.2f%%. New entries paused.",
+                  eq, peakEquity, ddPct, MaxDrawdownPercent);
+   }
+   else if(drawdownPaused)
+   {
+      double lossAtPause = peakEquity - drawdownPauseEquity;
+      double recoveredNeeded = lossAtPause * ResumeRecoveryPercent / 100.0;
+      if(eq >= drawdownPauseEquity + recoveredNeeded)
+      {
+         drawdownPaused = false;
+         PrintFormat("[DD-RESUME] Equity %.2f recovered. Trading resumes on next signal.", eq);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Breakeven + Grid                                                 |
+//+------------------------------------------------------------------+
+void BreakevenAndGridHandler()
+{
+   if(!UseBreakeven && !UseGridTrailing) return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!positionInfo.SelectByIndex(i)) continue;
+      if(positionInfo.Symbol() != _Symbol || positionInfo.Magic() != InpMagicNumber) continue;
+
+      bool isBuy   = (positionInfo.PositionType() == POSITION_TYPE_BUY);
+      double entry = positionInfo.PriceOpen();
+      double sl    = positionInfo.StopLoss();
+      double tp    = positionInfo.TakeProfit();
+
+      double price = isBuy ? symInfo.Bid() : symInfo.Ask();
+      double profitPriceDist = isBuy ? (price - entry) : (entry - price);
+      if(profitPriceDist <= 0) continue;
+
+      int profitPoints = (int)MathFloor(profitPriceDist / _Point);
+      int profitPips   = profitPoints / pipMultiplier;
+
+      int lockPips = -1;
+
+      if(UseBreakeven && profitPips >= BreakevenTrigger_Pips)
+         lockPips = BreakevenOffset_Pips;
+
+      if(UseGridTrailing && GridStep_Pips > 0)
+      {
+         int beyondBE = profitPips - BreakevenTrigger_Pips;
+         if(beyondBE >= GridStep_Pips)
+         {
+            int steps = beyondBE / GridStep_Pips;
+            int gridLock = BreakevenOffset_Pips + steps * GridLock_Pips;
+            if(gridLock > lockPips) lockPips = gridLock;
+         }
+      }
+
+      if(lockPips < 0) continue;
+
+      double lockPrice = isBuy ? entry + PipsToPrice(lockPips)
+                               : entry - PipsToPrice(lockPips);
+      lockPrice = NormalizeDouble(lockPrice, _Digits);
+
+      bool shouldMove = false;
+      if(isBuy)  shouldMove = (sl == 0) || (lockPrice > sl + _Point);
+      else       shouldMove = (sl == 0) || (lockPrice < sl - _Point);
+
+      if(isBuy  && lockPrice >= price) continue;
+      if(!isBuy && lockPrice <= price) continue;
+
+      if(shouldMove)
+      {
+         if(!trade.PositionModify(positionInfo.Ticket(), lockPrice, tp))
+         {
+            if(VerboseLogs)
+               PrintFormat("[BE/GRID] Modify failed ticket=%I64u err=%d %s",
+                           positionInfo.Ticket(), GetLastError(),
+                           trade.ResultRetcodeDescription());
+         }
+         else if(VerboseLogs)
+         {
+            PrintFormat("[BE/GRID] Ticket=%I64u %s SL->%.*f (lock %d pips, profit %d pips)",
+                        positionInfo.Ticket(), isBuy ? "BUY" : "SELL",
+                        _Digits, lockPrice, lockPips, profitPips);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Trailing                                                         |
+//+------------------------------------------------------------------+
+void TrailingStopHandler()
+{
+   double trailDistPrice;
+   double stepDistPrice;
+
+   if(UseATR_Distance)
+   {
+      trailDistPrice = DynamicDistance(ATR_Trail_Multiplier);
+      stepDistPrice  = trailDistPrice * 0.2;
+   }
+   else
+   {
+      if(effTrailingStopPts <= 0) return;
+      trailDistPrice = effTrailingStopPts * _Point;
+      stepDistPrice  = effTrailingStepPts * _Point;
+   }
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!positionInfo.SelectByIndex(i)) continue;
+      if(positionInfo.Symbol() != _Symbol || positionInfo.Magic() != InpMagicNumber) continue;
+
+      double currentSL = positionInfo.StopLoss();
+      double currentTP = positionInfo.TakeProfit();
+      double openPrice = positionInfo.PriceOpen();
+      bool isBuy = (positionInfo.PositionType() == POSITION_TYPE_BUY);
+      double currentPrice = isBuy ? symInfo.Bid() : symInfo.Ask();
+      double newSL = 0;
+
+      if(isBuy)
+      {
+         double trailLevel = currentPrice - trailDistPrice;
+         if(trailLevel > openPrice)
+            if(currentSL == 0 || trailLevel > currentSL + stepDistPrice)
+               newSL = trailLevel;
+      }
+      else
+      {
+         double trailLevel = currentPrice + trailDistPrice;
+         if(trailLevel < openPrice)
+            if(currentSL == 0 || trailLevel < currentSL - stepDistPrice)
+               newSL = trailLevel;
+      }
+
+      if(newSL != 0)
+      {
+         newSL = NormalizeDouble(newSL, _Digits);
+         if(!trade.PositionModify(positionInfo.Ticket(), newSL, currentTP))
+            if(VerboseLogs)
+               PrintFormat("[TRAIL] Modify failed ticket=%I64u err=%d %s",
+                           positionInfo.Ticket(), GetLastError(),
+                           trade.ResultRetcodeDescription());
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Init                                                              |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(InpMagicNumber);
+   trade.SetDeviationInPoints(SlippagePoints);
+   trade.SetTypeFillingBySymbol(_Symbol);
+   trade.SetMarginMode();
+
+   if(!symInfo.Name(_Symbol)) return(INIT_FAILED);
+   symInfo.RefreshRates();
+
+   effStartTime = (int)MathMax(0, MathMin(23, StartTime));
+   effEndTime   = (int)MathMax(0, MathMin(23, EndTime));
+   effMaPeriod  = (int)MathMax(2, MathMin(100, Ma_period));
+   effBbPeriod  = (int)MathMax(5, MathMin(100, Bb_period));
+   effFastEma   = (int)MathMax(5, MathMin(100, Fast_emaperiod));
+   effSlowEma   = (int)MathMax(5, MathMin(150, Slow_emaperiod));
+   effSignalSma = (int)MathMax(5, MathMin(150, Signal_smaperiod));
+   effRsiPeriod = (int)MathMax(5, MathMin(50, Rsi_period));
+
+   pipMultiplier = DetectPipMultiplier();
+
+   effMaxStopLossPts   = ResolveDistance(MaxStopLoss_Pips,    MaxStopLoss_Points);
+   effMinSLPts         = ResolveDistance(MinSL_Pips,          MinSL_Points);
+   effDeltaStopPts     = ResolveDistance(DeltaStop_Pips,      DeltaStop_Points);
+   effDeltaLimitPts    = ResolveDistance(DeltaLimit_Pips,     DeltaLimit_Points);
+   effTrailingStopPts  = ResolveDistance(TrailingStop_Pips,   TrailingStop_Points);
+   effTrailingStepPts  = ResolveDistance(TrailingStep_Pips,   TrailingStep_Points);
+
+   priceMaxStopLoss = PointsToPrice(effMaxStopLossPts);
+   priceMinSL       = PointsToPrice(effMinSLPts);
+   priceDeltaStop   = PointsToPrice(effDeltaStopPts);
+   priceDeltaLimit  = PointsToPrice(effDeltaLimitPts);
+
+   maHandle    = iMA(_Symbol, TimeFrame, effMaPeriod, 0, MODE_SMA, PRICE_CLOSE);
+   bbHandle    = iBands(_Symbol, TimeFrame, effBbPeriod, 0, 2.0, PRICE_CLOSE);
+   macdHandle  = iMACD(_Symbol, TimeFrame, effFastEma, effSlowEma, effSignalSma, PRICE_CLOSE);
+   rsiHandle   = iRSI(_Symbol, TimeFrame, effRsiPeriod, PRICE_CLOSE);
+   atrHandle   = iATR(_Symbol, TimeFrame, ATR_Period);
+   stochHandle = iStochastic(_Symbol, TimeFrame, Stoch_KPeriod, Stoch_DPeriod, Stoch_Slowing,
+                             MODE_SMA, STO_LOWHIGH);
+   adxHandle   = iADX(_Symbol, TimeFrame, ADX_Period);
+
+   if(maHandle == INVALID_HANDLE || bbHandle == INVALID_HANDLE ||
+      macdHandle == INVALID_HANDLE || rsiHandle == INVALID_HANDLE ||
+      atrHandle == INVALID_HANDLE || stochHandle == INVALID_HANDLE ||
+      adxHandle == INVALID_HANDLE)
+   {
+      Print("Failed to create indicators");
+      return(INIT_FAILED);
+   }
+
+   barsCount   = Bars(_Symbol, TimeFrame);
+   initBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   peakEquity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   drawdownPaused = false;
+   RefreshLowRiskFlags();
+
+   PrintFormat("VibrixEA v2.10 init. Symbol=%s Digits=%d PipMult=%d ATR=%s Stoch=%s MACDx=%s ADX=%s",
+               _Symbol, _Digits, pipMultiplier,
+               UseATR_Distance     ? "ON" : "OFF",
+               UseFilter_Stoch     ? "ON" : "OFF",
+               UseFilter_MACDCross ? "ON" : "OFF",
+               UseFilter_ADX       ? "ON" : "OFF");
+   return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason)
+{
+   if(maHandle != INVALID_HANDLE)    IndicatorRelease(maHandle);
+   if(bbHandle != INVALID_HANDLE)    IndicatorRelease(bbHandle);
+   if(macdHandle != INVALID_HANDLE)  IndicatorRelease(macdHandle);
+   if(rsiHandle != INVALID_HANDLE)   IndicatorRelease(rsiHandle);
+   if(atrHandle != INVALID_HANDLE)   IndicatorRelease(atrHandle);
+   if(stochHandle != INVALID_HANDLE) IndicatorRelease(stochHandle);
+   if(adxHandle != INVALID_HANDLE)   IndicatorRelease(adxHandle);
+   if(!MQLInfoInteger(MQL_TESTER)) ObjectsDeleteAll(0, "VibrixEA_");
+}
+
+//+------------------------------------------------------------------+
+//| Tracking                                                         |
+//+------------------------------------------------------------------+
+void RefreshLowRiskFlags()
+{
+   hasLowRiskBuy = hasLowRiskSell = false;
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+      if(positionInfo.SelectByIndex(i) && positionInfo.Symbol() == _Symbol && positionInfo.Magic() == InpMagicNumber)
+      {
+         if(positionInfo.PositionType() == POSITION_TYPE_BUY)  hasLowRiskBuy  = true;
+         if(positionInfo.PositionType() == POSITION_TYPE_SELL) hasLowRiskSell = true;
+      }
+}
+
+bool HasPendingOfType(ENUM_ORDER_TYPE type)
+{
+   for(int i = OrdersTotal()-1; i >= 0; i--)
+   {
+      if(!orderInfo.SelectByIndex(i)) continue;
+      if(orderInfo.Symbol() != _Symbol || orderInfo.Magic() != InpMagicNumber) continue;
+      if(orderInfo.OrderType() == type) return true;
+   }
+   return false;
+}
+
+bool GetIndicator(int handle, int buffer, int shift, double &value)
+{
+   double tmp[1];
+   if(CopyBuffer(handle, buffer, shift, 1, tmp) != 1) return false;
+   value = tmp[0];
+   return true;
+}
+
+double TotalProfit()
+{
+   double sum = 0;
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+      if(positionInfo.SelectByIndex(i) && positionInfo.Symbol() == _Symbol && positionInfo.Magic() == InpMagicNumber)
+         sum += positionInfo.Profit() + positionInfo.Swap() + positionInfo.Commission();
+   return sum;
+}
+
+void CloseAllPositions(string reason)
+{
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+      if(positionInfo.SelectByIndex(i) && positionInfo.Symbol() == _Symbol && positionInfo.Magic() == InpMagicNumber)
+         trade.PositionClose(positionInfo.Ticket());
+   for(int i = OrdersTotal()-1; i >= 0; i--)
+      if(orderInfo.SelectByIndex(i) && orderInfo.Symbol() == _Symbol && orderInfo.Magic() == InpMagicNumber)
+         trade.OrderDelete(orderInfo.Ticket());
+   hasLowRiskBuy = hasLowRiskSell = false;
+   if(VerboseLogs) PrintFormat("[CLOSE-ALL] reason=%s", reason);
+}
+
+double NormalizeLot(double lot)
+{
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(stepLot <= 0) stepLot = 0.01;
+   lot = MathFloor(lot / stepLot) * stepLot;
+   lot = MathMax(minLot, MathMin(maxLot, lot));
+   int decimals = (stepLot >= 0.1) ? 2 : 3;
+   return NormalizeDouble(lot, decimals);
+}
+
+double ComputeLots()
+{
+   double lot = Lots;
+   if(AutoLot > 0)
+   {
+      double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+      lot = NormalizeDouble((freeMargin * AutoLot) / 10000.0, 2);
+   }
+   lot = NormalizeLot(lot);
+   if(lot <= 0) return 0;
+   double marginReq, ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lot, ask, marginReq))
+      if(marginReq > AccountInfoDouble(ACCOUNT_MARGIN_FREE)) return 0;
+   return lot;
+}
+
+double LookbackHigh(int bars)
+{
+   double hi[];
+   if(CopyHigh(_Symbol, TimeFrame, 1, bars, hi) != bars) return 0;
+   double v = hi[0];
+   for(int i=1; i<bars; i++) if(hi[i] > v) v = hi[i];
+   return v;
+}
+double LookbackLow(int bars)
+{
+   double lo[];
+   if(CopyLow(_Symbol, TimeFrame, 1, bars, lo) != bars) return 0;
+   double v = lo[0];
+   for(int i=1; i<bars; i++) if(lo[i] < v) v = lo[i];
+   return v;
+}
+
+//+------------------------------------------------------------------+
+double EffectiveMaxSLDistance()
+{
+   if(UseATR_Distance) return DynamicDistance(ATR_SL_Multiplier);
+   return priceMaxStopLoss;
+}
+
+double BuyStopLoss(double entry, double lookbackLow)
+{
+   double maxDist = EffectiveMaxSLDistance();
+   double slDistance = entry - lookbackLow;
+   if(slDistance <= 0 || slDistance > maxDist) slDistance = maxDist;
+   return NormalizeDouble(entry - slDistance, _Digits);
+}
+double SellStopLoss(double entry, double lookbackHigh)
+{
+   double maxDist = EffectiveMaxSLDistance();
+   double slDistance = lookbackHigh - entry;
+   if(slDistance <= 0 || slDistance > maxDist) slDistance = maxDist;
+   return NormalizeDouble(entry + slDistance, _Digits);
+}
+
+double GetStopsLevel() { return SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point; }
+
+void LogOrderResult(string action, bool ok)
+{
+   if(!VerboseLogs) return;
+   if(ok)
+      PrintFormat("[ORDER OK] %s ticket=%I64u code=%u", action, trade.ResultOrder(), trade.ResultRetcode());
+   else
+      PrintFormat("[ORDER FAIL] %s code=%u %s lastErr=%d",
+                  action, trade.ResultRetcode(), trade.ResultRetcodeDescription(), GetLastError());
+}
+
+bool OpenBuy(double lot, double sl)
+{
+   double ask = symInfo.Ask();
+   double tp = ComputeTakeProfitPrice(ask, true, lot);
+   if(tp > 0 && tp <= ask) tp = 0;
+   double stopLevel = GetStopsLevel();
+   if(stopLevel > 0)
+   {
+      if(sl > 0 && (ask - sl) < stopLevel) sl = ask - stopLevel;
+      if(tp > 0 && (tp - ask) < stopLevel) tp = ask + stopLevel;
+   }
+   sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0;
+   tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0;
+   bool ok = trade.Buy(lot, _Symbol, ask, sl, tp, InpTradeComment);
+   LogOrderResult("BUY market", ok);
+   return ok;
+}
+
+bool OpenSell(double lot, double sl)
+{
+   double bid = symInfo.Bid();
+   double tp = ComputeTakeProfitPrice(bid, false, lot);
+   if(tp > 0 && tp >= bid) tp = 0;
+   double stopLevel = GetStopsLevel();
+   if(stopLevel > 0)
+   {
+      if(sl > 0 && (sl - bid) < stopLevel) sl = bid + stopLevel;
+      if(tp > 0 && (bid - tp) < stopLevel) tp = bid - stopLevel;
+   }
+   sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0;
+   tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0;
+   bool ok = trade.Sell(lot, _Symbol, bid, sl, tp, InpTradeComment);
+   LogOrderResult("SELL market", ok);
+   return ok;
+}
+
+bool PlacePending(ENUM_ORDER_TYPE type, double lot, double price, double sl, double entryForTP)
+{
+   bool isBuy = (type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_BUY_LIMIT);
+   double tp = ComputeTakeProfitPrice(entryForTP, isBuy, lot);
+   if(tp > 0)
+   {
+      if(isBuy && tp <= price) tp = 0;
+      if(!isBuy && tp >= price) tp = 0;
+   }
+
+   double stopLevel = GetStopsLevel();
+   double mkt = isBuy ? symInfo.Ask() : symInfo.Bid();
+   double dist = MathAbs(price - mkt);
+   if(stopLevel > 0 && dist < stopLevel)
+   {
+      if(VerboseLogs)
+         PrintFormat("[PEND SKIP] type=%d price=%.*f mkt=%.*f dist=%.*f < stopLevel=%.*f",
+                     type, _Digits, price, _Digits, mkt, _Digits, dist, _Digits, stopLevel);
+      return false;
+   }
+
+   price = NormalizeDouble(price, _Digits);
+   sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0;
+   tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0;
+
+   bool ok = false;
+   string label = "";
+   switch(type)
+   {
+      case ORDER_TYPE_BUY_STOP:
+         ok = trade.BuyStop(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, InpTradeComment);
+         label = "BUY STOP"; break;
+      case ORDER_TYPE_SELL_STOP:
+         ok = trade.SellStop(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, InpTradeComment);
+         label = "SELL STOP"; break;
+      case ORDER_TYPE_BUY_LIMIT:
+         ok = trade.BuyLimit(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, InpTradeComment);
+         label = "BUY LIMIT"; break;
+      case ORDER_TYPE_SELL_LIMIT:
+         ok = trade.SellLimit(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, InpTradeComment);
+         label = "SELL LIMIT"; break;
+      default: return false;
+   }
+   LogOrderResult(label, ok);
+   return ok;
+}
+
+//+------------------------------------------------------------------+
+//| Filter helpers                                                   |
+//+------------------------------------------------------------------+
+// Stoch crossover in OB/OS zone:
+//   BUY  : %K crossed above %D (curr>D, prev<=D) AND prev %K was in oversold zone
+//   SELL : %K crossed below %D (curr<D, prev>=D) AND prev %K was in overbought zone
+bool StochFilter(bool wantBuy)
+{
+   double k_curr, k_prev, d_curr, d_prev;
+   if(!GetIndicator(stochHandle, 0, 1, k_curr)) return false;   // %K main
+   if(!GetIndicator(stochHandle, 0, 2, k_prev)) return false;
+   if(!GetIndicator(stochHandle, 1, 1, d_curr)) return false;   // %D signal
+   if(!GetIndicator(stochHandle, 1, 2, d_prev)) return false;
+
+   if(wantBuy)
+   {
+      bool crossed = (k_prev <= d_prev) && (k_curr > d_curr);
+      bool inOS    = (k_prev <= Stoch_Oversold) || (d_prev <= Stoch_Oversold);
+      return crossed && inOS;
+   }
+   else
+   {
+      bool crossed = (k_prev >= d_prev) && (k_curr < d_curr);
+      bool inOB    = (k_prev >= Stoch_Overbought) || (d_prev >= Stoch_Overbought);
+      return crossed && inOB;
+   }
+}
+
+// MACD main vs signal cross (independent confirmation in addition to core MACD condition)
+//   BUY  : main was <= signal previously, now main > signal
+//   SELL : main was >= signal previously, now main < signal
+bool MACDCrossFilter(bool wantBuy)
+{
+   double main_curr, main_prev, sig_curr, sig_prev;
+   if(!GetIndicator(macdHandle, 0, 1, main_curr)) return false;
+   if(!GetIndicator(macdHandle, 0, 2, main_prev)) return false;
+   if(!GetIndicator(macdHandle, 1, 1, sig_curr))  return false;
+   if(!GetIndicator(macdHandle, 1, 2, sig_prev))  return false;
+
+   if(wantBuy)  return (main_prev <= sig_prev) && (main_curr > sig_curr);
+   else         return (main_prev >= sig_prev) && (main_curr < sig_curr);
+}
+
+// ADX > threshold (no DI direction check - just "is it trending?")
+bool ADXFilter()
+{
+   double adxVal;
+   if(!GetIndicator(adxHandle, 0, 1, adxVal)) return false;     // ADX main line
+   return adxVal >= ADX_Threshold;
+}
+
+// Master gate: all enabled filters must pass
+bool ConfirmationFilters(bool wantBuy)
+{
+   if(UseFilter_Stoch && !StochFilter(wantBuy))
+   {
+      if(LogBlockedSignals) PrintFormat("[FILTER] %s blocked by Stoch", wantBuy ? "BUY" : "SELL");
+      return false;
+   }
+   if(UseFilter_MACDCross && !MACDCrossFilter(wantBuy))
+   {
+      if(LogBlockedSignals) PrintFormat("[FILTER] %s blocked by MACDCross", wantBuy ? "BUY" : "SELL");
+      return false;
+   }
+   if(UseFilter_ADX && !ADXFilter())
+   {
+      if(LogBlockedSignals) PrintFormat("[FILTER] %s blocked by ADX<thr", wantBuy ? "BUY" : "SELL");
+      return false;
+   }
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| OnTick                                                           |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return;
+   if(!symInfo.RefreshRates()) return;
+
+   RefreshLowRiskFlags();
+   UpdateLabels();
+   UpdateDrawdownState();
+   CheckEquityTakeProfit();
+   CheckMoneyTPSL();
+   BreakevenAndGridHandler();
+   TrailingStopHandler();
+
+   if(UseClosedCandle && !IsNewBar()) return;
+   if(!InTradingWindow()) return;
+   if(drawdownPaused) return;
+
+   double ma_curr, ma_prev3, bb_mid;
+   double macd_main_curr, macd_main_prev;
+   double rsi_curr;
+   if(!GetIndicator(maHandle,   0, 1, ma_curr))         return;
+   if(!GetIndicator(maHandle,   0, 3, ma_prev3))        return;
+   if(!GetIndicator(bbHandle,   0, 1, bb_mid))          return;
+   if(!GetIndicator(macdHandle, 0, 1, macd_main_curr))  return;
+   if(!GetIndicator(macdHandle, 0, 2, macd_main_prev))  return;
+   if(!GetIndicator(rsiHandle,  0, 1, rsi_curr))        return;
+
+   double rangeHigh = LookbackHigh(LookbackBars);
+   double rangeLow  = LookbackLow(LookbackBars);
+   if(rangeHigh <= 0 || rangeLow <= 0) return;
+
+   double ask = symInfo.Ask(), bid = symInfo.Bid();
+   double lot = ComputeLots();
+   if(lot <= 0) return;
+
+   double deltaStopPx  = UseATR_Distance ? DynamicDistance(ATR_DeltaStop_Multiplier)  : priceDeltaStop;
+   double deltaLimitPx = UseATR_Distance ? DynamicDistance(ATR_DeltaLimit_Multiplier) : priceDeltaLimit;
+
+   // === Symmetric core signal ===
+   // BUY : MA crosses up through BB middle, MACD main rising, RSI not at extremes
+   // SELL: MA crosses down through BB middle, MACD main FALLING (mirror of BUY), RSI not at extremes
+   bool buyCore  = (ma_curr > bb_mid) && (ma_prev3 < bb_mid) &&
+                   (macd_main_curr > macd_main_prev) &&
+                   (rsi_curr > 20 && rsi_curr < 80);
+   bool sellCore = (ma_curr < bb_mid) && (ma_prev3 > bb_mid) &&
+                   (macd_main_curr < macd_main_prev) &&         // <-- FIXED: was checking signal cross on prev bar
+                   (rsi_curr > 20 && rsi_curr < 80);
+
+   bool buySignal  = buyCore  && ConfirmationFilters(true);
+   bool sellSignal = sellCore && ConfirmationFilters(false);
+
+   if(LogBlockedSignals)
+   {
+      if(buyCore  && !buySignal)  Print("[FILTER] BUY core fired but a confirmation filter blocked it");
+      if(sellCore && !sellSignal) Print("[FILTER] SELL core fired but a confirmation filter blocked it");
+   }
+
+   // BUY low risk
+   if(BUY_market_lowRisk && !hasLowRiskBuy && buySignal)
+   {
+      double sl = BuyStopLoss(ask, rangeLow);
+      if(OpenBuy(lot, sl)) hasLowRiskBuy = true;
+   }
+   // BUY market
+   if(BUY_market && buySignal)
+   {
+      double sl = BuyStopLoss(ask, rangeLow);
+      OpenBuy(lot, sl);
+   }
+   // BUY stop
+   if(BUY_stop && buySignal)
+   {
+      if(SkipIfPendingExists && HasPendingOfType(ORDER_TYPE_BUY_STOP))
+      { if(VerboseLogs) Print("[PEND SKIP] BUY STOP already exists"); }
+      else
+      {
+         double price = ask + deltaStopPx;
+         double sl = BuyStopLoss(price, rangeLow);
+         PlacePending(ORDER_TYPE_BUY_STOP, lot, price, sl, price);
+      }
+   }
+   // BUY limit (fade on sellSignal)
+   if(BUY_limit && sellSignal)
+   {
+      if(SkipIfPendingExists && HasPendingOfType(ORDER_TYPE_BUY_LIMIT))
+      { if(VerboseLogs) Print("[PEND SKIP] BUY LIMIT already exists"); }
+      else
+      {
+         double price = bid - deltaLimitPx;
+         double sl = BuyStopLoss(price, rangeLow);
+         PlacePending(ORDER_TYPE_BUY_LIMIT, lot, price, sl, price);
+      }
+   }
+
+   // SELL low risk
+   if(SELL_market_lowRisk && !hasLowRiskSell && sellSignal)
+   {
+      double sl = SellStopLoss(bid, rangeHigh);
+      if(OpenSell(lot, sl)) hasLowRiskSell = true;
+   }
+   // SELL market
+   if(SELL_market && sellSignal)
+   {
+      double sl = SellStopLoss(bid, rangeHigh);
+      OpenSell(lot, sl);
+   }
+   // SELL stop
+   if(SELL_stop && sellSignal)
+   {
+      if(SkipIfPendingExists && HasPendingOfType(ORDER_TYPE_SELL_STOP))
+      { if(VerboseLogs) Print("[PEND SKIP] SELL STOP already exists"); }
+      else
+      {
+         double price = bid - deltaStopPx;
+         double sl = SellStopLoss(price, rangeHigh);
+         PlacePending(ORDER_TYPE_SELL_STOP, lot, price, sl, price);
+      }
+   }
+   // SELL limit
+   if(SELL_limit)
+   {
+      bool place = sellSignal;
+      if(SELL_limit_StrictFilter)
+      {
+         double priceToLow = ask - rangeLow;
+         place = sellSignal &&
+                 (priceToLow >= priceMinSL) && (priceToLow <= priceMinSL * 5);
+      }
+      if(place)
+      {
+         if(SkipIfPendingExists && HasPendingOfType(ORDER_TYPE_SELL_LIMIT))
+         { if(VerboseLogs) Print("[PEND SKIP] SELL LIMIT already exists"); }
+         else
+         {
+            double price = ask + deltaLimitPx;
+            double sl = SellStopLoss(price, rangeHigh);
+            PlacePending(ORDER_TYPE_SELL_LIMIT, lot, price, sl, price);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Helpers                                                           |
+//+------------------------------------------------------------------+
+bool IsNewBar()
+{
+   int bars = Bars(_Symbol, TimeFrame);
+   if(bars == barsCount) return false;
+   barsCount = bars;
+   return true;
+}
+
+bool InTradingWindow()
+{
+   MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
+   if(dt.hour < effStartTime || dt.hour > effEndTime) return false;
+   return true;
+}
+
+void CheckEquityTakeProfit()
+{
+   if(TakeProfitPercent <= 0) return;
+   double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   double floatingPL = eq - bal;
+   double threshold = eq * TakeProfitPercent / 100.0;
+   if(floatingPL >= threshold && floatingPL > 0) CloseAllPositions("EquityTP");
+}
+
+void CheckMoneyTPSL()
+{
+   double profit = TotalProfit();
+   if(All_Prof > 0 && profit >=  All_Prof) CloseAllPositions("MoneyTP");
+   if(All_Loss > 0 && profit <= -All_Loss) CloseAllPositions("MoneySL");
+}
+
+void UpdateLabels()
+{
+   if(MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_VISUAL_MODE)) return;
+   string currency = " " + AccountInfoString(ACCOUNT_CURRENCY);
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double ddPct = (peakEquity > 0) ? (peakEquity - eq) / peakEquity * 100.0 : 0;
+
+   string atState = drawdownPaused ? "PAUSED (DD)" : "Autotrading Enabled";
+   color  atColor = drawdownPaused ? clrOrange     : clrLime;
+
+   string filt = "";
+   if(UseFilter_Stoch)     filt += "S ";
+   if(UseFilter_MACDCross) filt += "M ";
+   if(UseFilter_ADX)       filt += "A ";
+   if(filt == "") filt = "none";
+
+   DrawLabel("VibrixEA_AT",   atState, 5, 15, 1, atColor);
+   DrawLabel("VibrixEA_Bal",  "Balance " + DoubleToString(bal,2)+currency, 5, 35, 1, clrWhite);
+   DrawLabel("VibrixEA_Eq",   "Equity "  + DoubleToString(eq,2)+currency,  5, 55, 1, clrDeepSkyBlue);
+   double pl = bal - initBalance;
+   DrawLabel("VibrixEA_PL",   "P/L "     + DoubleToString(pl,2)+currency,  5, 80, 1, (pl>=0?clrLime:clrRed));
+   DrawLabel("VibrixEA_DD",   "DD "      + DoubleToString(ddPct,2)+"%  Peak " + DoubleToString(peakEquity,2),
+             5, 100, 1, (ddPct >= MaxDrawdownPercent && MaxDrawdownPercent>0) ? clrRed : clrSilver);
+   DrawLabel("VibrixEA_Filt", "Filters: " + filt, 5, 120, 1, clrSilver);
+}
+
+void DrawLabel(string name, string text, int x, int y, int corner, color clr)
+{
+   if(ObjectFind(0,name)<0)
+   {
+      ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+      ObjectSetInteger(0,name,OBJPROP_CORNER,corner);
+      ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+      ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+      ObjectSetInteger(0,name,OBJPROP_FONTSIZE,10);
+      ObjectSetString(0,name,OBJPROP_FONT,"Arial");
+   }
+   ObjectSetString(0,name,OBJPROP_TEXT,text);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
+}
+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest      &request,
+                        const MqlTradeResult       &result)
+{
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+      RefreshLowRiskFlags();
+}
+//+------------------------------------------------------------------+
