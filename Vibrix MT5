@@ -1,0 +1,641 @@
+//+------------------------------------------------------------------+
+//|                                            VibrixGroupEA_BTC.mq5 |
+//|                        MQL5 conversion - BTCUSD defaults         |
+//+------------------------------------------------------------------+
+#property copyright "MQL5 conversion - BTC defaults"
+#property link      ""
+#property version   "1.10"
+#property strict
+#property description "Vibrix Group EA - intraday scalper (M15-H1)."
+#property description "Defaults tuned for BTCUSD. Fully backtestable in MT5."
+
+#include <Trade\Trade.mqh>
+#include <Trade\SymbolInfo.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\OrderInfo.mqh>
+#include <Trade\AccountInfo.mqh>
+
+CTrade         trade;
+CSymbolInfo    symInfo;
+CPositionInfo  positionInfo;
+COrderInfo     orderInfo;
+CAccountInfo   accountInfo;
+
+//+------------------------------------------------------------------+
+//| Input parameters - BTCUSD-tuned defaults                          |
+//+------------------------------------------------------------------+
+input string   EAName                = "Vibrix Group EA - BTC";
+input ulong    InpMagicNumber        = 2024;
+input int      StartTime             = 0;        // StartTime (00-23)
+input int      EndTime               = 23;       // EndTime (00-23)
+input ENUM_TIMEFRAMES TimeFrame      = PERIOD_M15;
+
+input bool     BUY_market_lowRisk    = true;
+input bool     SELL_market_lowRisk   = true;
+input bool     BUY_market            = false;
+input bool     SELL_market           = false;
+input bool     BUY_stop              = false;
+input bool     SELL_stop             = false;
+input bool     BUY_limit             = false;
+input bool     SELL_limit            = false;
+
+//--- BTC-specific lots (BTC moves $$$ per unit, so default is tiny)
+input double   Lots                  = 0.01;     // BTCUSD default (~$1 per dollar move at 0.01)
+input double   AutoLot               = 0;        // 0 = disabled, otherwise % of free margin
+input double   TakeProfitPercent     = 2;        // Equity % to close all in profit (0 = off)
+input double   All_Prof              = 50;       // Money TP in account currency (0 = off)
+input double   All_Loss              = 200;      // Money SL in account currency (0 = off)
+
+//--- BTC moves in whole dollars; SL/TP in *price points* of the symbol
+//--- For BTCUSD, _Point is usually 0.01, so 1 "BTC dollar" = 100 points
+//--- Below values are in BTC USD-DOLLARS (we convert internally based on _Digits)
+input double   FixTP_USD             = 200;      // Fixed Take Profit in USD (BTC dollars)
+input double   MaxStopLoss_USD       = 400;      // Max SL distance in USD (BTC dollars)
+input double   Minsl_USD             = 100;      // Minimum SL/range filter in USD
+input double   DeltaStop_USD         = 300;      // Pending stop offset in USD
+input double   DeltaLimit_USD        = 150;      // Pending limit offset in USD
+
+input int      Ma_period             = 10;       // MA period (2-100)
+input int      Bb_period             = 17;       // Bollinger period (5-100)
+input int      Fast_emaperiod        = 10;       // MACD Fast (5-100)
+input int      Slow_emaperiod        = 19;       // MACD Slow (5-150)
+input int      Signal_smaperiod      = 13;       // MACD Signal (5-150)
+input int      Rsi_period            = 12;       // RSI period (5-50)
+
+input ulong    SlippagePoints        = 50;       // Slippage in points (BTC needs more)
+input bool     UseClosedCandle       = true;     // Trade only on new bar
+
+//+------------------------------------------------------------------+
+//| Global variables                                                  |
+//+------------------------------------------------------------------+
+int      maHandle      = INVALID_HANDLE;
+int      bbHandle      = INVALID_HANDLE;
+int      macdHandle    = INVALID_HANDLE;
+int      rsiHandle     = INVALID_HANDLE;
+
+int      barsCount     = 0;
+
+//--- Internal SL/TP storage (in PRICE units, not points)
+double   priceFixTP        = 0.0;
+double   priceMaxStopLoss  = 0.0;
+double   priceMinSL        = 0.0;
+double   priceDeltaStop    = 0.0;
+double   priceDeltaLimit   = 0.0;
+
+int      effStartTime;
+int      effEndTime;
+int      effMaPeriod;
+int      effBbPeriod;
+int      effFastEma;
+int      effSlowEma;
+int      effSignalSma;
+int      effRsiPeriod;
+
+double   initBalance   = 0.0;
+
+bool     hasLowRiskBuy  = false;
+bool     hasLowRiskSell = false;
+
+const int LookbackBars = 10;
+
+//+------------------------------------------------------------------+
+//| Convert "USD dollars" input to symbol price units                 |
+//+------------------------------------------------------------------+
+//| For BTCUSD: 1 USD = 1.0 in price (Digits=2 typically, Point=0.01) |
+//| For XAUUSD: 1 USD = 1.0 in price (Digits=2, Point=0.01)           |
+//| We just store inputs directly as price-distances.                 |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                    |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(InpMagicNumber);
+   trade.SetDeviationInPoints(SlippagePoints);
+   trade.SetTypeFillingBySymbol(_Symbol);
+   trade.SetMarginMode();
+
+   if(!symInfo.Name(_Symbol))
+   {
+      Print("Failed to set symbol info for ", _Symbol);
+      return(INIT_FAILED);
+   }
+   symInfo.RefreshRates();
+
+   //--- Clamp parameters
+   effStartTime = (int)MathMax(0, MathMin(23, StartTime));
+   effEndTime   = (int)MathMax(0, MathMin(23, EndTime));
+   effMaPeriod  = (int)MathMax(2, MathMin(100, Ma_period));
+   effBbPeriod  = (int)MathMax(5, MathMin(100, Bb_period));
+   effFastEma   = (int)MathMax(5, MathMin(100, Fast_emaperiod));
+   effSlowEma   = (int)MathMax(5, MathMin(150, Slow_emaperiod));
+   effSignalSma = (int)MathMax(5, MathMin(150, Signal_smaperiod));
+   effRsiPeriod = (int)MathMax(5, MathMin(50, Rsi_period));
+
+   //--- BTC inputs are already in USD; for BTCUSD 1 USD = 1.0 price unit
+   //--- For other symbols you may need to scale, but for BTCUSD this is direct.
+   priceFixTP       = FixTP_USD;
+   priceMaxStopLoss = MaxStopLoss_USD;
+   priceMinSL       = Minsl_USD;
+   priceDeltaStop   = DeltaStop_USD;
+   priceDeltaLimit  = DeltaLimit_USD;
+
+   //--- Create indicator handles
+   maHandle   = iMA(_Symbol, TimeFrame, effMaPeriod, 0, MODE_SMA, PRICE_CLOSE);
+   bbHandle   = iBands(_Symbol, TimeFrame, effBbPeriod, 0, 2.0, PRICE_CLOSE);
+   macdHandle = iMACD(_Symbol, TimeFrame, effFastEma, effSlowEma, effSignalSma, PRICE_CLOSE);
+   rsiHandle  = iRSI(_Symbol, TimeFrame, effRsiPeriod, PRICE_CLOSE);
+
+   if(maHandle   == INVALID_HANDLE ||
+      bbHandle   == INVALID_HANDLE ||
+      macdHandle == INVALID_HANDLE ||
+      rsiHandle  == INVALID_HANDLE)
+   {
+      Print("Failed to create one or more indicator handles");
+      return(INIT_FAILED);
+   }
+
+   barsCount   = Bars(_Symbol, TimeFrame);
+   initBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   RefreshLowRiskFlags();
+
+   PrintFormat("VibrixEA-BTC init OK. Symbol=%s Digits=%d Point=%.5f FixTP=%.2f MaxSL=%.2f",
+               _Symbol, _Digits, _Point, priceFixTP, priceMaxStopLoss);
+
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                  |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   if(maHandle   != INVALID_HANDLE) IndicatorRelease(maHandle);
+   if(bbHandle   != INVALID_HANDLE) IndicatorRelease(bbHandle);
+   if(macdHandle != INVALID_HANDLE) IndicatorRelease(macdHandle);
+   if(rsiHandle  != INVALID_HANDLE) IndicatorRelease(rsiHandle);
+
+   if(!MQLInfoInteger(MQL_TESTER))
+      ObjectsDeleteAll(0, "VibrixEA_");
+}
+
+//+------------------------------------------------------------------+
+//| Refresh which low-risk slots are taken                            |
+//+------------------------------------------------------------------+
+void RefreshLowRiskFlags()
+{
+   hasLowRiskBuy  = false;
+   hasLowRiskSell = false;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(positionInfo.SelectByIndex(i))
+      {
+         if(positionInfo.Symbol() == _Symbol &&
+            positionInfo.Magic()  == InpMagicNumber)
+         {
+            if(positionInfo.PositionType() == POSITION_TYPE_BUY)  hasLowRiskBuy  = true;
+            if(positionInfo.PositionType() == POSITION_TYPE_SELL) hasLowRiskSell = true;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Helper: read indicator value                                      |
+//+------------------------------------------------------------------+
+bool GetIndicator(int handle, int buffer, int shift, double &value)
+{
+   double tmp[1];
+   if(CopyBuffer(handle, buffer, shift, 1, tmp) != 1)
+      return(false);
+   value = tmp[0];
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+//| Sum of floating P/L for our positions                             |
+//+------------------------------------------------------------------+
+double TotalProfit()
+{
+   double sum = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(positionInfo.SelectByIndex(i))
+      {
+         if(positionInfo.Symbol() == _Symbol &&
+            positionInfo.Magic()  == InpMagicNumber)
+         {
+            sum += positionInfo.Profit() + positionInfo.Swap() + positionInfo.Commission();
+         }
+      }
+   }
+   return(sum);
+}
+
+//+------------------------------------------------------------------+
+//| Close all of our positions and pending orders                     |
+//+------------------------------------------------------------------+
+void CloseAllPositions(string reason)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(positionInfo.SelectByIndex(i))
+      {
+         if(positionInfo.Symbol() == _Symbol &&
+            positionInfo.Magic()  == InpMagicNumber)
+         {
+            ulong ticket = positionInfo.Ticket();
+            if(!trade.PositionClose(ticket))
+               PrintFormat("Failed close ticket %I64u (%s): %d", ticket, reason, GetLastError());
+         }
+      }
+   }
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      if(orderInfo.SelectByIndex(i))
+      {
+         if(orderInfo.Symbol() == _Symbol &&
+            orderInfo.Magic()  == InpMagicNumber)
+         {
+            trade.OrderDelete(orderInfo.Ticket());
+         }
+      }
+   }
+   hasLowRiskBuy  = false;
+   hasLowRiskSell = false;
+}
+
+//+------------------------------------------------------------------+
+//| Normalize lot size                                                |
+//+------------------------------------------------------------------+
+double NormalizeLot(double lot)
+{
+   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   if(stepLot <= 0.0) stepLot = 0.01;
+   lot = MathFloor(lot / stepLot) * stepLot;
+   lot = MathMax(minLot, MathMin(maxLot, lot));
+   //--- Compute decimals from step
+   int decimals = 2;
+   if(stepLot >= 1.0)        decimals = 0;
+   else if(stepLot >= 0.1)   decimals = 1;
+   else if(stepLot >= 0.01)  decimals = 2;
+   else                      decimals = 3;
+   lot = NormalizeDouble(lot, decimals);
+   return(lot);
+}
+
+//+------------------------------------------------------------------+
+//| Compute trade volume                                              |
+//+------------------------------------------------------------------+
+double ComputeLots()
+{
+   double lot = Lots;
+   if(AutoLot > 0)
+   {
+      double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+      lot = NormalizeDouble((freeMargin * AutoLot) / 10000.0, 2);
+   }
+   lot = NormalizeLot(lot);
+   if(lot <= 0.0) return(0.0);
+
+   double marginReq = 0.0;
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lot, ask, marginReq))
+   {
+      double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+      if(marginReq > freeMargin) return(0.0);
+   }
+   return(lot);
+}
+
+//+------------------------------------------------------------------+
+//| Lookback high/low                                                 |
+//+------------------------------------------------------------------+
+double LookbackHigh(int bars)
+{
+   double hi[];
+   if(CopyHigh(_Symbol, TimeFrame, 1, bars, hi) != bars) return(0.0);
+   double maxV = hi[0];
+   for(int i = 1; i < bars; i++) if(hi[i] > maxV) maxV = hi[i];
+   return(maxV);
+}
+
+double LookbackLow(int bars)
+{
+   double lo[];
+   if(CopyLow(_Symbol, TimeFrame, 1, bars, lo) != bars) return(0.0);
+   double minV = lo[0];
+   for(int i = 1; i < bars; i++) if(lo[i] < minV) minV = lo[i];
+   return(minV);
+}
+
+//+------------------------------------------------------------------+
+//| Update on-chart info labels                                       |
+//+------------------------------------------------------------------+
+void UpdateLabels()
+{
+   if(MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_VISUAL_MODE))
+      return;
+
+   string currency = " " + AccountInfoString(ACCOUNT_CURRENCY);
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   DrawLabel("VibrixEA_AT",  "Autotrading Enabled",                                5, 15, 1, clrLime);
+   DrawLabel("VibrixEA_Bal", "Balance " + DoubleToString(bal, 2) + currency,       5, 35, 1, clrWhite);
+   DrawLabel("VibrixEA_Eq",  "Equity " + DoubleToString(eq, 2) + currency,         5, 55, 1, clrDeepSkyBlue);
+   double pl = bal - initBalance;
+   DrawLabel("VibrixEA_PL",  "P/L " + DoubleToString(pl, 2) + currency,            5, 80, 1, (pl >= 0 ? clrLime : clrRed));
+}
+
+void DrawLabel(string name, string text, int x, int y, int corner, color clr)
+{
+   if(ObjectFind(0, name) < 0)
+   {
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, corner);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 10);
+      ObjectSetString(0,  name, OBJPROP_FONT, "Arial");
+   }
+   ObjectSetString(0,  name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+}
+
+//+------------------------------------------------------------------+
+//| Trading window check                                              |
+//+------------------------------------------------------------------+
+bool InTradingWindow()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   //--- BTC trades 24/7, so weekend filter is OPTIONAL.
+   //--- Comment the next two lines if your broker offers weekend BTC.
+   //if(dt.day_of_week == 0 || dt.day_of_week == 6) return(false);
+   if(dt.hour < effStartTime) return(false);
+   if(dt.hour > effEndTime)   return(false);
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+//| Equity & money TP/SL                                              |
+//+------------------------------------------------------------------+
+void CheckEquityTakeProfit()
+{
+   if(TakeProfitPercent <= 0) return;
+   double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   double floatingPL = eq - bal;
+   double threshold  = (eq * TakeProfitPercent) / 100.0;
+   if(floatingPL >= threshold && floatingPL > 0)
+      CloseAllPositions("EquityTP");
+}
+
+void CheckMoneyTPSL()
+{
+   double profit = TotalProfit();
+   if(All_Prof > 0 && profit >= All_Prof) { CloseAllPositions("MoneyTP"); return; }
+   if(All_Loss > 0 && profit <= -All_Loss){ CloseAllPositions("MoneySL"); return; }
+}
+
+//+------------------------------------------------------------------+
+//| New-bar detector                                                  |
+//+------------------------------------------------------------------+
+bool IsNewBar()
+{
+   int bars = Bars(_Symbol, TimeFrame);
+   if(bars == barsCount) return(false);
+   barsCount = bars;
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate stop loss prices                                        |
+//+------------------------------------------------------------------+
+double BuyStopLoss(double entry, double lookbackLow)
+{
+   double slDistance = entry - lookbackLow;
+   if(slDistance > priceMaxStopLoss || slDistance <= 0)
+      slDistance = priceMaxStopLoss;
+   return(NormalizeDouble(entry - slDistance, _Digits));
+}
+
+double SellStopLoss(double entry, double lookbackHigh)
+{
+   double slDistance = lookbackHigh - entry;
+   if(slDistance > priceMaxStopLoss || slDistance <= 0)
+      slDistance = priceMaxStopLoss;
+   return(NormalizeDouble(entry + slDistance, _Digits));
+}
+
+//+------------------------------------------------------------------+
+//| Order placement helpers                                           |
+//+------------------------------------------------------------------+
+bool OpenBuy(double lot, double sl, double tp)
+{
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double stopLevel = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   if(stopLevel > 0)
+   {
+      if(sl > 0 && (ask - sl) < stopLevel) sl = ask - stopLevel;
+      if(tp > 0 && (tp - ask) < stopLevel) tp = ask + stopLevel;
+   }
+   sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0.0;
+   tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0.0;
+   return(trade.Buy(lot, _Symbol, ask, sl, tp, "VibrixEA"));
+}
+
+bool OpenSell(double lot, double sl, double tp)
+{
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double stopLevel = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   if(stopLevel > 0)
+   {
+      if(sl > 0 && (sl - bid) < stopLevel) sl = bid + stopLevel;
+      if(tp > 0 && (bid - tp) < stopLevel) tp = bid - stopLevel;
+   }
+   sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0.0;
+   tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0.0;
+   return(trade.Sell(lot, _Symbol, bid, sl, tp, "VibrixEA"));
+}
+
+bool PlaceBuyStop(double lot, double price, double sl, double tp)
+{
+   price = NormalizeDouble(price, _Digits);
+   sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0.0;
+   tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0.0;
+   return(trade.BuyStop(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "VibrixEA"));
+}
+
+bool PlaceBuyLimit(double lot, double price, double sl, double tp)
+{
+   price = NormalizeDouble(price, _Digits);
+   sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0.0;
+   tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0.0;
+   return(trade.BuyLimit(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "VibrixEA"));
+}
+
+bool PlaceSellStop(double lot, double price, double sl, double tp)
+{
+   price = NormalizeDouble(price, _Digits);
+   sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0.0;
+   tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0.0;
+   return(trade.SellStop(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "VibrixEA"));
+}
+
+bool PlaceSellLimit(double lot, double price, double sl, double tp)
+{
+   price = NormalizeDouble(price, _Digits);
+   sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0.0;
+   tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0.0;
+   return(trade.SellLimit(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "VibrixEA"));
+}
+
+//+------------------------------------------------------------------+
+//| Main tick handler                                                 |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   if(UseClosedCandle && !IsNewBar())
+      return;
+
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return;
+   if(!symInfo.RefreshRates()) return;
+
+   RefreshLowRiskFlags();
+   UpdateLabels();
+   CheckEquityTakeProfit();
+   CheckMoneyTPSL();
+
+   if(!InTradingWindow()) return;
+
+   //--- Indicator readings
+   double ma_curr, ma_prev3;
+   double bb_mid;
+   double macd_main_curr, macd_signal_curr, macd_main_prev, macd_signal_prev;
+   double rsi_curr;
+
+   if(!GetIndicator(maHandle,   0, 1, ma_curr))           return;
+   if(!GetIndicator(maHandle,   0, 3, ma_prev3))          return;
+   if(!GetIndicator(bbHandle,   0, 1, bb_mid))            return;
+   if(!GetIndicator(macdHandle, 0, 0, macd_main_curr))    return;
+   if(!GetIndicator(macdHandle, 1, 0, macd_signal_curr))  return;
+   if(!GetIndicator(macdHandle, 0, 1, macd_main_prev))    return;
+   if(!GetIndicator(macdHandle, 1, 1, macd_signal_prev))  return;
+   if(!GetIndicator(rsiHandle,  0, 1, rsi_curr))          return;
+
+   //--- Lookback range (excluding current bar)
+   double rangeHigh = LookbackHigh(LookbackBars);
+   double rangeLow  = LookbackLow(LookbackBars);
+   if(rangeHigh <= 0 || rangeLow <= 0) return;
+
+   double ask = symInfo.Ask();
+   double bid = symInfo.Bid();
+   double priceToLow = ask - rangeLow;
+
+   double lot = ComputeLots();
+   if(lot <= 0.0) return;
+
+   //--- Signal definitions
+   bool buySignal  = (ma_curr > bb_mid) && (ma_prev3 < bb_mid) &&
+                     (macd_main_curr > macd_main_prev) &&
+                     (rsi_curr > 20) && (rsi_curr < 80);
+
+   bool sellSignal = (ma_curr < bb_mid) && (ma_prev3 > bb_mid) &&
+                     (macd_main_prev > macd_signal_prev) &&
+                     (rsi_curr < 80) && (rsi_curr > 20);
+
+   //--- BUY low risk
+   if(BUY_market_lowRisk && !hasLowRiskBuy && buySignal)
+   {
+      double sl = BuyStopLoss(ask, rangeLow);
+      double tp = ask + priceFixTP;
+      if(OpenBuy(lot, sl, tp)) hasLowRiskBuy = true;
+   }
+
+   //--- BUY market
+   if(BUY_market && buySignal)
+   {
+      double sl = BuyStopLoss(ask, rangeLow);
+      double tp = ask + priceFixTP;
+      OpenBuy(lot, sl, tp);
+   }
+
+   //--- BUY stop pending
+   if(BUY_stop && buySignal)
+   {
+      double price = ask + priceDeltaStop;
+      double sl = BuyStopLoss(price, rangeLow);
+      double tp = price + (price - rangeLow);
+      PlaceBuyStop(lot, price, sl, tp);
+   }
+
+   //--- BUY limit
+   if(BUY_limit && sellSignal)
+   {
+      double price = bid - priceDeltaLimit;
+      double sl = BuyStopLoss(price, rangeLow);
+      double tp = price + (bid - rangeLow);
+      PlaceBuyLimit(lot, price, sl, tp);
+   }
+
+   //--- SELL low risk
+   if(SELL_market_lowRisk && !hasLowRiskSell && sellSignal)
+   {
+      double sl = SellStopLoss(bid, rangeHigh);
+      double tp = bid - priceFixTP;
+      if(OpenSell(lot, sl, tp)) hasLowRiskSell = true;
+   }
+
+   //--- SELL market
+   if(SELL_market && sellSignal)
+   {
+      double sl = SellStopLoss(bid, rangeHigh);
+      double tp = bid - priceFixTP;
+      OpenSell(lot, sl, tp);
+   }
+
+   //--- SELL stop pending
+   if(SELL_stop && sellSignal)
+   {
+      double price = bid - priceDeltaStop;
+      double sl = SellStopLoss(price, rangeHigh);
+      double tp = price - (rangeHigh - price);
+      PlaceSellStop(lot, price, sl, tp);
+   }
+
+   //--- SELL limit
+   if(SELL_limit)
+   {
+      bool extraSell = (ma_curr > bb_mid) && (ma_prev3 < bb_mid) &&
+                       (macd_main_curr > macd_main_prev) &&
+                       (rsi_curr > 20) && (rsi_curr < 80) &&
+                       (priceToLow >= priceMinSL) &&
+                       (priceToLow <= priceMinSL * 5);
+      if(extraSell)
+      {
+         double price = ask + priceDeltaLimit;
+         double sl = SellStopLoss(price, rangeHigh);
+         double tp = price - (rangeHigh - price);
+         PlaceSellLimit(lot, price, sl, tp);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Trade transaction handler — keep low-risk flags in sync           |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest      &request,
+                        const MqlTradeResult       &result)
+{
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+      RefreshLowRiskFlags();
+}
+//+------------------------------------------------------------------+
