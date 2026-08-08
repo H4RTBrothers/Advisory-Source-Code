@@ -33,32 +33,32 @@ input string          Minimal_Deposit      = "$200";
 input string          Time_Frame           = "Time Frame M1";
 input string          Pairs                = "EurUsd";
 input int             MagicNumber         = 1111111;
-input bool            Use_MultiPair        = false;    // Enable Multi-Pair Dashboard
-input string          MultiPairs           = "BTCUSDm"; // Pairs: comma-separated
+input bool            Use_MultiPair        = true;     // Enable Multi-Pair Dashboard
+input string          MultiPairs           = "BTCUSDm,EURUSDm,XAUUSDm"; // Pairs: comma-separated
 
 input group "=== Lot Settings ==="
-input bool            Use_Fixed_Lot       = true;
+input bool            Use_Fixed_Lot       = false;
 input double          Lot                  = 0.01;
 input double          LotMultiplikator    = 1.21;
 input int             LotMode             = 1;  // 0=Fixed, 1=Multiplier, 2=Recovery
 
 input group "=== Trade Settings ==="
-input double          TakeProfit          = 34;
-input double          Step                = 21;
-input double          Averaging           = 1;
+input double          TakeProfit          = 300;
+input double          Step                = 21.0;
+input double          Averaging           = 1.0;
 input int             MaxTrades           = 31;
 input int             MinTradeDelaySec    = 60;       // Min seconds between trades
 
 input group "=== TP Multiplier ==="
-input bool            Use_TP_Multiplier   = false;    // Use TP Multiplier
-input double          TP_Multiplier       = 1.5;      // TP Multiplier per averaging level
-input int             TP_Max_Level        = 10;       // Max averaging level for TP calc
+input bool            Use_TP_Multiplier   = true;    // Use TP Multiplier
+input double          TP_Multiplier       = 1.21;      // TP Multiplier per averaging level
+input int             TP_Max_Level        = 300;       // Max averaging level for TP calc
 input bool            Use_SeparateTP      = true;     // Show separate TP per side when hedged
 
 input group "=== Hidden TP & Daily Target ==="
-input bool            Use_Daily_Target    = true;
+input bool            Use_Daily_Target    = false;
 input double          Daily_Target        = 100;
-input bool            Hidden_TP           = true;
+input bool            Hidden_TP           = false;
 input double          Hiden_TP            = 500;
 
 input group "=== Equity Protection ==="
@@ -67,11 +67,11 @@ input double          TotalEquityRisk     = 20;
 
 input group "=== Time Filter ==="
 input int             Open_Hour           = 0;
-input int             Close_Hour          = 23;
+input int             Close_Hour          = 24;
 input bool            TradeOnThursday     = true;
-input int             Thursday_Hour       = 12;
+input int             Thursday_Hour       = 24;
 input bool            TradeOnFriday       = true;
-input int             Friday_Hour         = 20;
+input int             Friday_Hour         = 24;
 
 input group "=== Sideway Filter ==="
 input bool            Filter_Sideway      = true;
@@ -124,15 +124,15 @@ input int             delay               = 5;        // Delay if something goes
 input group "=== HEDGE SETTINGS ==="
 input bool            Use_Hedging         = true;
 input double          HedgeDistancePips   = 30;
-input double          HedgeLotMultiplier  = 1.0;
-input double          HedgeProfitTarget   = 50;
+input double          HedgeLotMultiplier  = 1.21;
+input double          HedgeProfitTarget   = 300.0;
 input int             MaxHedgeCount       = 3;
 input double          HedgeStepPips       = 30;
 input bool            Use_Hedge_TP        = true;
-input double          HedgeTakeProfit     = 50;
+input double          HedgeTakeProfit     = 300.0;
 
 input group "=== TRAILING STOP SETTINGS ==="
-input bool            Use_Trailing_Stop   = true;
+input bool            Use_Trailing_Stop   = false;
 input int             TrailingMode        = 0;         // 0=Fixed Pips, 1=ATR Based
 input double          TrailingStartPips   = 20;
 input double          TrailingStepPips    = 5;
@@ -140,24 +140,24 @@ input double          TrailingDistancePips = 15;
 input int             Trail_ATR_Period     = 14;        // Trail ATR Period
 input double          Trail_ATR_Multiplier = 1.5;       // Trail ATR Multiplier for distance
 input ENUM_TIMEFRAMES Trail_ATR_Timeframe  = PERIOD_H1; // Trail ATR Timeframe
-input bool            Use_Breakeven       = true;
+input bool            Use_Breakeven       = false;
 input double          BreakevenStartPips  = 15;
 input double          BreakevenProfitPips = 5;
 
 input group "=== EQUITY ATR TRAIL ==="
-input bool                  Use_EquityATRTrail  = false;    // Enable Equity ATR Trail
+input bool                  Use_EquityATRTrail  = true;    // Enable Equity ATR Trail
 input ENUM_ATR_MULT_START   EquityATR_StartMult = ATR_MULT_2_0; // Start trail after equity drops ATR × this from peak
 input ENUM_ATR_MULT_CLOSE   EquityATR_CloseMult = ATR_CLOSE_3_0; // Close when equity drops ATR × this from peak
-input int                   EquityATR_CloseSide = 2;        // 0=All, 1=Buys, 2=Sells, 3=Profitable side
+input int                   EquityATR_CloseSide = 3;        // 0=All, 1=Buys, 2=Sells, 3=Profitable side
 input bool                  EquityATR_CloseOnNewPeak = true; // Close all when equity makes new peak after trail
 input ENUM_TIMEFRAMES       EquityATR_Timeframe = PERIOD_H1; // ATR Timeframe for equity trail
 input int                   EquityATR_Period    = 14;        // ATR Period for equity trail
 
 input group "=== TIMEFRAME SWITCH ON DRAWDOWN ==="
-input bool            Use_DrawdownSwitch  = true;
+input bool            Use_DrawdownSwitch  = false;
 input double          DD_Low              = 5;        // DD% → switch to Mid TF
 input double          DD_High             = 10;       // DD% → switch to High TF
-input ENUM_TIMEFRAMES Timeframe_Low       = PERIOD_M1;
+input ENUM_TIMEFRAMES Timeframe_Low       = PERIOD_CURRENT;
 input ENUM_TIMEFRAMES Timeframe_Mid       = PERIOD_M5;
 input ENUM_TIMEFRAMES Timeframe_High      = PERIOD_M15;
 input bool            Auto_Switch_Back    = true;
@@ -250,6 +250,8 @@ datetime g_timeoutTime;
 double   g_initialBalance;
 bool     g_firstRun;
 int      g_averagingCount;
+int      g_buyAveragingCount;
+int      g_sellAveragingCount;
 
 // Symbol type detection
 bool     g_isCrypto;
@@ -326,6 +328,7 @@ struct PairTradeState
    bool     canTrade;
    datetime lastTradeTime;
    datetime timeoutTime;
+   datetime freshBarTime;  // Track fresh bar for multi-pair
 };
 
 PairTradeState g_pts[MAX_PAIRS];
@@ -366,6 +369,8 @@ int OnInit()
    g_initialBalance = 0;
    g_firstRun = true;
    g_averagingCount = -2;
+   g_buyAveragingCount = 0;
+   g_sellAveragingCount = 0;
 
    // Detect symbol type (crypto vs forex)
    string sym = _Symbol;
@@ -540,10 +545,11 @@ int OnInit()
             g_pts[pi].averagingCount = 0;
             g_pts[pi].lot = Lot;
             g_pts[pi].canTrade = true;
-            g_pts[pi].lastTradeTime = 0;
-            g_pts[pi].timeoutTime = 0;
+             g_pts[pi].lastTradeTime = 0;
+             g_pts[pi].timeoutTime = 0;
+             g_pts[pi].freshBarTime = 0;
 
-            double ask = SymbolInfoDouble(s, SYMBOL_ASK);
+             double ask = SymbolInfoDouble(s, SYMBOL_ASK);
             double bid = SymbolInfoDouble(s, SYMBOL_BID);
             double pt  = SymbolInfoDouble(s, SYMBOL_POINT);
             int    dg  = (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
@@ -667,6 +673,12 @@ void OnTick()
    // NEWS MANAGEMENT - Close positions before news
    if(g_newsActive)
    {
+      static datetime lastNewsLog = 0;
+      if(TimeCurrent() - lastNewsLog >= 120)
+      {
+         lastNewsLog = TimeCurrent();
+         Print("TRADING BLOCKED BY NEWS FILTER - g_newsActive=true, events=", g_newsCount);
+      }
       ManageNewsClose();
       DisplayInfo();
       return; // Skip all trading during news
@@ -676,7 +688,7 @@ void OnTick()
    if(Use_Daily_Target && CheckDailyTarget())
    {
       CloseAllPositions();
-      Comment("Daily target reached!");
+      Print("Daily target reached!");
       return;
    }
 
@@ -746,16 +758,28 @@ void OnTick()
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-     // === ORIGINAL ALGORITHM: FIRST ENTRY (no positions) ===
-     if(g_totalCount == 0)
-     {
-        if(!g_canTrade)
-           return;
-        if(g_manualPaused)
-           return;
-        if(!CheckTimeFilter())
-           return;
-        if(!CheckVolatilityFilter())
+      // === ORIGINAL ALGORITHM: FIRST ENTRY (no positions) ===
+      if(g_totalCount == 0)
+      {
+         if(!g_canTrade)
+         {
+            static datetime logCanTrade = 0;
+            if(TimeCurrent() - logCanTrade >= 120) { logCanTrade = TimeCurrent(); Print("BLOCKED: canTrade=false"); }
+            return;
+         }
+         if(g_manualPaused)
+         {
+            static datetime logPaused = 0;
+            if(TimeCurrent() - logPaused >= 120) { logPaused = TimeCurrent(); Print("BLOCKED: manualPaused=true"); }
+            return;
+         }
+         if(!CheckTimeFilter())
+         {
+            static datetime logTime = 0;
+            if(TimeCurrent() - logTime >= 120) { logTime = TimeCurrent(); Print("BLOCKED: TimeFilter (check trading hours)"); }
+            return;
+         }
+         if(!CheckVolatilityFilter())
         {
            Print("BLOCKED by Volatility Filter (ATR spike)");
            return;
@@ -787,6 +811,8 @@ void OnTick()
           {
              g_timeoutTime = TimeCurrent() + (TimeOut_Hours * 3600);
              g_averagingCount = 0;
+             g_buyAveragingCount = 0;
+             g_sellAveragingCount = 0;
           }
        }
        else if(close2 < close1)
@@ -797,6 +823,8 @@ void OnTick()
           {
              g_timeoutTime = TimeCurrent() + (TimeOut_Hours * 3600);
              g_averagingCount = 0;
+             g_buyAveragingCount = 0;
+             g_sellAveragingCount = 0;
           }
        }
        else
@@ -864,24 +892,27 @@ void OnTick()
              if(shouldOpen && CheckTimeFilter() && !g_newsActive && timeOK
                 && CheckVolatilityFilter() && CheckRangeFilter())
             {
-               // Calculate averaging lot
-               g_averagingCount++;
-               g_lot = GetAveragingLot();
-
+               // Use per-side averaging count for lot multiplier
                if(direction == 1)
                {
+                  g_buyAveragingCount++;
+                  g_averagingCount = g_buyAveragingCount;
+                  g_lot = GetAveragingLot();
                   if(OpenBuy())
                   {
                      g_lastTradeTime = TimeCurrent();
-                     Print("AVERAGING BUY #", g_averagingCount, " lot=", DoubleToString(g_lot, 2));
+                     Print("AVERAGING BUY #", g_buyAveragingCount, " lot=", DoubleToString(g_lot, 2));
                   }
                }
                else if(direction == 2)
                {
+                  g_sellAveragingCount++;
+                  g_averagingCount = g_sellAveragingCount;
+                  g_lot = GetAveragingLot();
                   if(OpenSell())
                   {
                      g_lastTradeTime = TimeCurrent();
-                     Print("AVERAGING SELL #", g_averagingCount, " lot=", DoubleToString(g_lot, 2));
+                     Print("AVERAGING SELL #", g_sellAveragingCount, " lot=", DoubleToString(g_lot, 2));
                   }
                }
             }
@@ -1595,11 +1626,27 @@ void AnalyzePositions()
 
         if(g_hasBuy && g_hasSell && Use_SeparateTP)
         {
-           // Hedged with separate TP: calculate TP for each side independently
+           // Hedged with separate TP: calculate TP for each side using per-side counts
            if(g_buyCount > 0)
-              g_buyTP = g_buyAvgPrice + (effectiveTP * _Point);
+           {
+              double buyTP = g_takeProfit;
+              if(Use_TP_Multiplier && g_buyAveragingCount > 0)
+              {
+                 int lvl = MathMin(g_buyAveragingCount, TP_Max_Level);
+                 buyTP = g_takeProfit * MathPow(TP_Multiplier, lvl);
+              }
+              g_buyTP = g_buyAvgPrice + (buyTP * _Point);
+           }
            if(g_sellCount > 0)
-              g_sellTP = g_sellAvgPrice - (effectiveTP * _Point);
+           {
+              double sellTP = g_takeProfit;
+              if(Use_TP_Multiplier && g_sellAveragingCount > 0)
+              {
+                 int lvl = MathMin(g_sellAveragingCount, TP_Max_Level);
+                 sellTP = g_takeProfit * MathPow(TP_Multiplier, lvl);
+              }
+              g_sellTP = g_sellAvgPrice - (sellTP * _Point);
+           }
            g_newTP = 0;
         }
         else if(g_hasBuy && g_hasSell && !Use_SeparateTP)
@@ -1619,6 +1666,8 @@ void AnalyzePositions()
        g_needModify = true;
 
       // Update averaging count based on position count
+      g_buyAveragingCount = (g_buyCount > 0) ? g_buyCount - 1 : 0;
+      g_sellAveragingCount = (g_sellCount > 0) ? g_sellCount - 1 : 0;
       g_averagingCount = g_totalCount - 1;
    }
 
@@ -3925,8 +3974,8 @@ void DrawICTChartObjects()
 #define LINE_H      13
 
 // Color scheme
-#define CLR_PANEL   C'22,22,30'    // Dark panel bg
-#define CLR_BORDER  C'50,50,65'    // Panel border
+#define CLR_PANEL   C'18,18,24'    // Dark panel bg
+#define CLR_BORDER  C'60,60,80'    // Panel border - brighter
 #define CLR_HEADER  C'0,170,120'   // Green header
 #define CLR_TEXT    C'180,180,190'  // Normal text
 #define CLR_DIM     C'100,100,120'  // Dim text
@@ -3941,6 +3990,8 @@ void MakeLabel(string name, string text, int x, int y, color clr, int size=8, st
 {
    string objName = "GUI_" + name;
    ObjectCreate(0, objName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, objName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, objName, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
    ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, y);
    ObjectSetString(0, objName, OBJPROP_TEXT, text);
@@ -3949,22 +4000,27 @@ void MakeLabel(string name, string text, int x, int y, color clr, int size=8, st
    ObjectSetInteger(0, objName, OBJPROP_COLOR, clr);
    ObjectSetInteger(0, objName, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, objName, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, objName, OBJPROP_ZORDER, 2000);
 }
 
 //+------------------------------------------------------------------+
 void MakePanel(string name, int x, int y, int w, int h)
 {
-   ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, name, OBJPROP_XSIZE, w);
-   ObjectSetInteger(0, name, OBJPROP_YSIZE, h);
-   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, CLR_PANEL);
-   ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, CLR_BORDER);
-   ObjectSetInteger(0, name, OBJPROP_BACK, false);
-   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   string objName = "GUI_" + name;
+   ObjectCreate(0, objName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, objName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, objName, OBJPROP_XSIZE, w);
+   ObjectSetInteger(0, objName, OBJPROP_YSIZE, h);
+   ObjectSetInteger(0, objName, OBJPROP_BGCOLOR, C'15,15,20');
+   ObjectSetInteger(0, objName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, objName, OBJPROP_COLOR, C'50,50,70');
+   ObjectSetInteger(0, objName, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, objName, OBJPROP_BACK, false);
+   ObjectSetInteger(0, objName, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, objName, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, objName, OBJPROP_ZORDER, 1000);
 }
 
 //+------------------------------------------------------------------+
@@ -3988,6 +4044,7 @@ void MakeButton(string name, string text, int x, int y, int w, color bgClr)
    ObjectSetInteger(0, objName, OBJPROP_BACK, false);
    ObjectSetInteger(0, objName, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, objName, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, objName, OBJPROP_ZORDER, 2000);
 }
 
 //+------------------------------------------------------------------+
@@ -4037,116 +4094,136 @@ void CalculateMultiPairStats()
 }
 
 //+------------------------------------------------------------------+
+//| Helper: Draw separator line                                        |
+//+------------------------------------------------------------------+
+void DrawSeparator(string name, int x, int y, int width, color clr)
+{
+   ObjectCreate(0, "GUI_" + name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "GUI_" + name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, "GUI_" + name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, "GUI_" + name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, "GUI_" + name, OBJPROP_XSIZE, width);
+   ObjectSetInteger(0, "GUI_" + name, OBJPROP_YSIZE, 1);
+   ObjectSetInteger(0, "GUI_" + name, OBJPROP_BGCOLOR, clr);
+   ObjectSetInteger(0, "GUI_" + name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, "GUI_" + name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, "GUI_" + name, OBJPROP_ZORDER, 2000);
+}
+
+//+------------------------------------------------------------------+
 void DisplayInfo()
 {
    ObjectsDeleteAll(0, "GUI_");
 
-   int px = PANEL_X;
-   int py = PANEL_Y;
    int panelW = 204;
-   int y = py + 6;
-   int lx = px + 6;
+   int contentW = panelW - 12;
+   int chartH = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+   int chartW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+
+   int lx = 6;
    int rx = lx + 90;
 
-    // Count lines for panel height
-     int lineCount = 12;
-     lineCount += 2;  // ATR + Range always shown
-     if(Use_Hedging) lineCount += 2;
-     if(Use_EquityATRTrail) lineCount += 1;
-     if(Use_MultiPair && g_pairCount > 0) lineCount += 2 + g_pairCount * 3;
-     if(Filter_News) lineCount += 4;
-     if(ShowSMCDashboard) lineCount += 12;
-     if(ShowICTDashboard) lineCount += 16;
+   // ======== PASS 1: Calculate Panel 1 height ========
+   int y1 = 6;
+   y1 += 16 + 14 + 6;  // Header
+   y1 += LINE_H * 4 + 5;  // Account (4 lines + sep)
+   y1 += (LINE_H + 1) + LINE_H * 4 + (LINE_H + 2) + 5;  // Positions (6 lines + sep)
+   y1 += LINE_H + 1;  // STATUS header
+   if(Use_Trailing_Stop) y1 += LINE_H;
+   if(Use_DrawdownSwitch) y1 += LINE_H;
+   if(Use_Hedging) y1 += LINE_H;
+   if(Use_EquityATRTrail) y1 += LINE_H;
+   y1 += LINE_H;  // ATR
+   y1 += LINE_H;  // Range
+   if(Filter_News)
+   {
+      y1 += LINE_H;  // news status line
+      y1 += LINE_H * 3;  // up to 3 upcoming events
+      y1 += LINE_H;  // fallback message
+   }
+   y1 += LINE_H + 4;  // Trading status
+   y1 += (BTN_H + BTN_GAP) * 5 + BTN_H;  // 5 button rows + last button height
+   y1 += 8;  // bottom padding
+   int p1H = y1;
 
-   int panelH = lineCount * LINE_H + 50 + 100; // extra for buttons
-   MakePanel("BG", px, py, panelW, panelH);
+   // ======== PASS 2: Calculate Panel 2 height ========
+   int y2 = 6;
+   if(Use_MultiPair && g_pairCount > 0)
+   {
+      y2 += 5 + LINE_H + 1;  // sep + header
+      y2 += (LINE_H * 3) * g_pairCount;  // per pair: name+lots, bs, profit+dd
+      y2 += 2;
+   }
+   if(ShowSMCDashboard) y2 += 5 + LINE_H + 1 + LINE_H * 6 + 2;
+   if(ShowICTDashboard) y2 += 5 + LINE_H + 1 + LINE_H * 14 + 2;
+   int p2H = y2;
 
-   // === HEADER ===
+   // Layout decision
+   bool sideBySide = (panelW * 2 + 20 < chartW);
+   int p1x = PANEL_X;
+   int p1y = PANEL_Y;
+   int p2x, p2y;
+
+   if(sideBySide)
+   {
+      p2x = p1x + panelW + 10;
+      p2y = p1y;
+      if(p2H > chartH - 60) p2H = chartH - 60;
+   }
+   else
+   {
+      p2x = p1x;
+      p2y = p1y + p1H + 5;
+      if(p2y + p2H > chartH - 30)
+      {
+         p2H = chartH - 30 - p2y;
+         if(p2H < 40) p2H = 40;
+      }
+   }
+   if(p1H > chartH - 30) p1H = chartH - 30;
+
+   // ======== DRAW PANEL 1 ========
+   MakePanel("BG1", p1x, p1y, panelW, p1H);
+   int y = p1y + 6;
+
+   // Header
    MakeLabel("hdr1", "EURO SCALPER HEDGE", lx, y, CLR_HEADER, 9, "Arial Bold");
    y += 16;
    MakeLabel("hdr2", "v5.43  |  " + _Symbol, lx, y, CLR_DIM, 7);
    y += 14;
-
-   // Separator line
-   ObjectCreate(0, "GUI_sep1", OBJ_RECTANGLE_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, "GUI_sep1", OBJPROP_XDISTANCE, lx);
-   ObjectSetInteger(0, "GUI_sep1", OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, "GUI_sep1", OBJPROP_XSIZE, panelW - 12);
-   ObjectSetInteger(0, "GUI_sep1", OBJPROP_YSIZE, 1);
-   ObjectSetInteger(0, "GUI_sep1", OBJPROP_BGCOLOR, CLR_BORDER);
-   ObjectSetInteger(0, "GUI_sep1", OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, "GUI_sep1", OBJPROP_HIDDEN, true);
+   DrawSeparator("sep1", lx, y, contentW, CLR_BORDER);
    y += 6;
 
-   // === ACCOUNT ===
+   // Account
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
    double eq = AccountInfoDouble(ACCOUNT_EQUITY);
    color profitClr = g_totalProfit >= 0 ? CLR_PROFIT : CLR_LOSS;
-
-   MakeLabel("lbl_bal", "Balance", lx, y, CLR_DIM);   MakeLabel("val_bal", DoubleToString(bal, 2), rx, y, CLR_TEXT);
-   y += LINE_H;
-   MakeLabel("lbl_eq", "Equity", lx, y, CLR_DIM);     MakeLabel("val_eq", DoubleToString(eq, 2), rx, y, CLR_TEXT);
-   y += LINE_H;
-   MakeLabel("lbl_pnl", "Profit", lx, y, CLR_DIM);    MakeLabel("val_pnl", DoubleToString(g_totalProfit, 2), rx, y, profitClr);
-   y += LINE_H;
-
-   // Magic
-   MakeLabel("lbl_magic", "Magic", lx, y, CLR_DIM);   MakeLabel("val_magic", IntegerToString(g_magic), rx, y, CLR_DIM);
-   y += LINE_H;
-
-   // Separator
-   ObjectCreate(0, "GUI_sep2", OBJ_RECTANGLE_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, "GUI_sep2", OBJPROP_XDISTANCE, lx);
-   ObjectSetInteger(0, "GUI_sep2", OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, "GUI_sep2", OBJPROP_XSIZE, panelW - 12);
-   ObjectSetInteger(0, "GUI_sep2", OBJPROP_YSIZE, 1);
-   ObjectSetInteger(0, "GUI_sep2", OBJPROP_BGCOLOR, CLR_BORDER);
-   ObjectSetInteger(0, "GUI_sep2", OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, "GUI_sep2", OBJPROP_HIDDEN, true);
+   MakeLabel("lbl_bal", "Balance", lx, y, CLR_DIM); MakeLabel("val_bal", DoubleToString(bal, 2), rx, y, CLR_TEXT); y += LINE_H;
+   MakeLabel("lbl_eq", "Equity", lx, y, CLR_DIM);   MakeLabel("val_eq", DoubleToString(eq, 2), rx, y, CLR_TEXT);   y += LINE_H;
+   MakeLabel("lbl_pnl", "Profit", lx, y, CLR_DIM);  MakeLabel("val_pnl", DoubleToString(g_totalProfit, 2), rx, y, profitClr); y += LINE_H;
+   MakeLabel("lbl_magic", "Magic", lx, y, CLR_DIM); MakeLabel("val_magic", IntegerToString(g_magic), rx, y, CLR_DIM); y += LINE_H;
+   DrawSeparator("sep2", lx, y, contentW, CLR_BORDER);
    y += 5;
 
-   // === POSITIONS ===
-   string posStr = IntegerToString(g_buyCount) + "B / " + IntegerToString(g_sellCount) + "S";
+   // Positions
    color buyClr = g_hasBuy ? CLR_BUY : CLR_DIM;
    color sellClr = g_hasSell ? CLR_SELL : CLR_DIM;
-
-   MakeLabel("hdr_pos", "POSITIONS", lx, y, CLR_ACCENT, 7, "Arial Bold");
-   y += LINE_H + 1;
-   MakeLabel("lbl_buys", "Buys", lx, y, CLR_DIM);     MakeLabel("val_buys", IntegerToString(g_buyCount), rx, y, buyClr);
-   y += LINE_H;
-   MakeLabel("lbl_sells", "Sells", lx, y, CLR_DIM);   MakeLabel("val_sells", IntegerToString(g_sellCount), rx, y, sellClr);
-   y += LINE_H;
-   MakeLabel("lbl_avg", "Avg", lx, y, CLR_DIM);       MakeLabel("val_avg", DoubleToString(g_avgPrice, _Digits), rx, y, CLR_TEXT);
-   y += LINE_H;
-   MakeLabel("lbl_lot", "Lot", lx, y, CLR_DIM);       MakeLabel("val_lot", DoubleToString(g_lot, 2), rx, y, CLR_TEXT);
-   y += LINE_H;
-   MakeLabel("lbl_tf", "TF", lx, y, CLR_DIM);         MakeLabel("val_tf", EnumToString(g_currentTimeframe), rx, y, CLR_TEXT);
-   y += LINE_H + 2;
-
-   // Separator
-   ObjectCreate(0, "GUI_sep3", OBJ_RECTANGLE_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, "GUI_sep3", OBJPROP_XDISTANCE, lx);
-   ObjectSetInteger(0, "GUI_sep3", OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, "GUI_sep3", OBJPROP_XSIZE, panelW - 12);
-   ObjectSetInteger(0, "GUI_sep3", OBJPROP_YSIZE, 1);
-   ObjectSetInteger(0, "GUI_sep3", OBJPROP_BGCOLOR, CLR_BORDER);
-   ObjectSetInteger(0, "GUI_sep3", OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, "GUI_sep3", OBJPROP_HIDDEN, true);
+   MakeLabel("hdr_pos", "POSITIONS", lx, y, CLR_ACCENT, 7, "Arial Bold"); y += LINE_H + 1;
+   MakeLabel("lbl_buys", "Buys", lx, y, CLR_DIM);   MakeLabel("val_buys", IntegerToString(g_buyCount), rx, y, buyClr);   y += LINE_H;
+   MakeLabel("lbl_sells", "Sells", lx, y, CLR_DIM);  MakeLabel("val_sells", IntegerToString(g_sellCount), rx, y, sellClr); y += LINE_H;
+   MakeLabel("lbl_avg", "Avg", lx, y, CLR_DIM);      MakeLabel("val_avg", DoubleToString(g_avgPrice, _Digits), rx, y, CLR_TEXT); y += LINE_H;
+   MakeLabel("lbl_lot", "Lot", lx, y, CLR_DIM);      MakeLabel("val_lot", DoubleToString(g_lot, 2), rx, y, CLR_TEXT);   y += LINE_H;
+   MakeLabel("lbl_tf", "TF", lx, y, CLR_DIM);        MakeLabel("val_tf", EnumToString(g_currentTimeframe), rx, y, CLR_TEXT); y += LINE_H + 2;
+   DrawSeparator("sep3", lx, y, contentW, CLR_BORDER);
    y += 5;
 
-   // === STATUS ===
-   MakeLabel("hdr_stat", "STATUS", lx, y, CLR_ACCENT, 7, "Arial Bold");
-   y += LINE_H + 1;
+   // Status
+   MakeLabel("hdr_stat", "STATUS", lx, y, CLR_ACCENT, 7, "Arial Bold"); y += LINE_H + 1;
 
-   // Trailing
    if(Use_Trailing_Stop)
    {
       string trailMode = (TrailingMode == 0) ? "Fixed" : "ATR";
       double bestPip = 0;
-      double curSL = 0;
-      double curOpen = 0;
-      long curType = -1;
-      // Find best trailing position
       for(int ti = PositionsTotal() - 1; ti >= 0; ti--)
       {
          ulong tt = PositionGetTicket(ti);
@@ -4154,39 +4231,30 @@ void DisplayInfo()
          if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
          if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
          double op = PositionGetDouble(POSITION_PRICE_OPEN);
-         double sl = PositionGetDouble(POSITION_SL);
          long tp = PositionGetInteger(POSITION_TYPE);
          double bid2 = SymbolInfoDouble(_Symbol, SYMBOL_BID);
          double ask2 = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          double pp = 0;
          if(tp == POSITION_TYPE_BUY)  pp = (bid2 - op) / _Point;
          if(tp == POSITION_TYPE_SELL) pp = (op - ask2) / _Point;
-         if(pp > bestPip) { bestPip = pp; curSL = sl; curOpen = op; curType = tp; }
+         if(pp > bestPip) bestPip = pp;
       }
       bool trailReady = (bestPip >= TrailingStartPips);
       string trailSt = trailReady ? "ACTIVE " + trailMode : "WAIT (" + DoubleToString(TrailingStartPips, 0) + ")";
-      color trailClr = trailReady ? CLR_PROFIT : CLR_DIM;
-      if(curSL > 0 && curType == POSITION_TYPE_BUY) trailSt += " SL:" + DoubleToString(curSL, _Digits);
-      else if(curSL > 0 && curType == POSITION_TYPE_SELL) trailSt += " SL:" + DoubleToString(curSL, _Digits);
-      else if(trailReady) trailSt += " SL:0";
       MakeLabel("lbl_trail", "Trail", lx, y, CLR_DIM);
-      MakeLabel("val_trail", trailSt, rx, y, trailClr);
+      MakeLabel("val_trail", trailSt, rx, y, trailReady ? CLR_PROFIT : CLR_DIM);
       y += LINE_H;
    }
 
-   // Drawdown
    if(Use_DrawdownSwitch)
    {
       double dd = 0;
-      if(g_peakBalance > 0)
-         dd = ((g_peakBalance - eq) / g_peakBalance) * 100.0;
-      color ddClr = dd > DD_High ? CLR_LOSS : dd > DD_Low ? CLR_ACCENT : CLR_PROFIT;
+      if(g_peakBalance > 0) dd = ((g_peakBalance - eq) / g_peakBalance) * 100.0;
       MakeLabel("lbl_dd", "DD%", lx, y, CLR_DIM);
-      MakeLabel("val_dd", DoubleToString(dd, 1) + "%", rx, y, ddClr);
+      MakeLabel("val_dd", DoubleToString(dd, 1) + "%", rx, y, dd > DD_High ? CLR_LOSS : CLR_PROFIT);
       y += LINE_H;
    }
 
-   // Hedge
    if(Use_Hedging)
    {
       bool hedged = g_hasBuy && g_hasSell;
@@ -4194,362 +4262,77 @@ void DisplayInfo()
       MakeLabel("val_hedge", hedged ? "ACTIVE" : "OFF", rx, y, hedged ? CLR_ACCENT : CLR_DIM);
       y += LINE_H;
    }
-   
-   // Equity ATR Trail
+
    if(Use_EquityATRTrail)
    {
       MakeLabel("lbl_eqtrail", "EqATR", lx, y, CLR_DIM);
-      if(g_equityTrailActive)
-      {
-         double atrVal[];
-         ArraySetAsSeries(atrVal, true);
-         double dropATR = 0;
-         if(CopyBuffer(g_equityAtrHandle, 0, 0, 1, atrVal) >= 1 && atrVal[0] > 0)
-            dropATR = (g_peakEquity - AccountInfoDouble(ACCOUNT_EQUITY)) / atrVal[0];
-         MakeLabel("val_eqtrail", DoubleToString(dropATR, 1) + "/" + DoubleToString(EquityATR_CloseMult / 10.0, 1), rx, y, CLR_LOSS);
-      }
-      else
-         MakeLabel("val_eqtrail", "OFF", rx, y, CLR_DIM);
+      MakeLabel("val_eqtrail", g_equityTrailActive ? "ON" : "OFF", rx, y, g_equityTrailActive ? CLR_LOSS : CLR_DIM);
       y += LINE_H;
    }
 
-   // ATR Display - ALWAYS show regardless of filter setting
-   {
-      double atrVal = GetATRValue();
-      double atrPrev = GetATRPrevValue();
-      MakeLabel("lbl_atr", "ATR", lx, y, CLR_DIM);
-      if(atrVal > 0)
-      {
-         string atrInfo = DoubleToString(atrVal, _Digits);
-         bool isSpike = (atrPrev > 0 && atrVal > atrPrev * ATR_Multiplier);
-         if(isSpike) atrInfo += " SPIKE";
-         MakeLabel("val_atr", atrInfo, rx, y, isSpike ? CLR_LOSS : CLR_ACCENT);
-      }
-      else
-         MakeLabel("val_atr", "N/A", rx, y, CLR_LOSS);
-      y += LINE_H;
-   }
+   // ATR + Range
+   double atrVal = GetATRValue();
+   MakeLabel("lbl_atr", "ATR", lx, y, CLR_DIM);
+   MakeLabel("val_atr", atrVal > 0 ? DoubleToString(atrVal, _Digits) : "N/A", rx, y, CLR_ACCENT);
+   y += LINE_H;
 
-   // Daily Range Display - ALWAYS show regardless of filter setting
-   {
-      double dHigh = iHigh(_Symbol, PERIOD_D1, 0);
-      double dLow = iLow(_Symbol, PERIOD_D1, 0);
-      double dayRangePts = (dHigh - dLow) / _Point;
-      double dayRangeDisp = dayRangePts / (double)g_pointDivider;
-      MakeLabel("lbl_range", "Range", lx, y, CLR_DIM);
-      MakeLabel("val_range", DoubleToString(dayRangeDisp, 1), rx, y, CLR_ACCENT);
-      y += LINE_H;
-   }
+   double dHigh = iHigh(_Symbol, PERIOD_D1, 0);
+   double dLow = iLow(_Symbol, PERIOD_D1, 0);
+   double dayRangeDisp = (dHigh - dLow) / _Point / (double)g_pointDivider;
+   MakeLabel("lbl_range", "Range", lx, y, CLR_DIM);
+   MakeLabel("val_range", DoubleToString(dayRangeDisp, 1), rx, y, CLR_ACCENT);
+   y += LINE_H;
 
-   // News
    if(Filter_News)
    {
       MakeLabel("lbl_news", "News", lx, y, CLR_DIM);
-      MakeLabel("val_news", g_newsActive ? "BLOCKED" : "OK", rx, y, g_newsActive ? CLR_LOSS : CLR_PROFIT);
+      string newsStatus = g_newsActive ? "BLOCKED" : "OK";
+      MakeLabel("val_news", newsStatus + " (" + IntegerToString(g_newsCount) + ")", rx, y, g_newsActive ? CLR_LOSS : CLR_PROFIT);
       y += LINE_H;
 
       datetime now = TimeCurrent();
-      for(int i = 0; i < g_newsCount && i < 2; i++)
+      bool foundNews = false;
+      for(int i = 0; i < g_newsCount && i < 3; i++)
       {
          if(g_newsEvents[i].time > now)
          {
             int mins = (int)((g_newsEvents[i].time - now) / 60);
-            MakeLabel("lbl_nws" + IntegerToString(i), ">" + IntegerToString(mins) + "m " + g_newsEvents[i].title, lx, y, CLR_DIM, 7);
+            string timeStr;
+            if(mins >= 60)
+               timeStr = IntegerToString(mins/60) + "h" + IntegerToString(mins%60) + "m";
+            else
+               timeStr = IntegerToString(mins) + "m";
+            MakeLabel("lbl_nws" + IntegerToString(i), ">" + timeStr + " " + g_newsEvents[i].title, lx, y, CLR_DIM, 7);
             y += LINE_H;
+            foundNews = true;
          }
+      }
+      if(!foundNews && g_newsCount > 0)
+      {
+         MakeLabel("lbl_nws_none", "No upcoming news", lx, y, CLR_DIM, 7);
+         y += LINE_H;
+      }
+      else if(g_newsCount == 0)
+      {
+         MakeLabel("lbl_nws_none", "News not loaded", lx, y, CLR_DIM, 7);
+         y += LINE_H;
       }
    }
 
-   // Pause status
    MakeLabel("lbl_pause", "Trading", lx, y, CLR_DIM);
    MakeLabel("val_pause", g_manualPaused ? "PAUSED" : "ACTIVE", rx, y, g_manualPaused ? CLR_LOSS : CLR_PROFIT);
-   y += LINE_H + 6;
+   y += LINE_H + 4;
 
-   // === MULTI-PAIR PANEL ===
-   if(Use_MultiPair && g_pairCount > 0)
-   {
-      CalculateMultiPairStats();
-
-      ObjectCreate(0, "GUI_sep_mp", OBJ_RECTANGLE_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, "GUI_sep_mp", OBJPROP_XDISTANCE, lx);
-      ObjectSetInteger(0, "GUI_sep_mp", OBJPROP_YDISTANCE, y);
-      ObjectSetInteger(0, "GUI_sep_mp", OBJPROP_XSIZE, panelW - 12);
-      ObjectSetInteger(0, "GUI_sep_mp", OBJPROP_YSIZE, 1);
-      ObjectSetInteger(0, "GUI_sep_mp", OBJPROP_BGCOLOR, CLR_BORDER);
-      ObjectSetInteger(0, "GUI_sep_mp", OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, "GUI_sep_mp", OBJPROP_HIDDEN, true);
-      y += 5;
-
-      MakeLabel("hdr_mp", "MULTI-PAIR", lx, y, CLR_ACCENT, 7, "Arial Bold");
-      y += LINE_H + 1;
-
-      for(int p = 0; p < g_pairCount; p++)
-      {
-         MakeLabel("mp_name" + IntegerToString(p), g_pairList[p], lx, y, CLR_DIM, 7);
-         MakeLabel("mp_lots" + IntegerToString(p), DoubleToString(g_pairLots[p], 2) + "L", rx, y, CLR_TEXT, 7);
-         y += LINE_H;
-
-         string bsStr = IntegerToString(g_pairBuyCount[p]) + "B/" + IntegerToString(g_pairSellCount[p]) + "S";
-         MakeLabel("mp_bs" + IntegerToString(p), bsStr, lx, y, CLR_DIM, 7);
-         y += LINE_H;
-
-         color pairPrClr = g_pairProfit[p] >= 0 ? CLR_PROFIT : CLR_LOSS;
-         MakeLabel("mp_pr" + IntegerToString(p), DoubleToString(g_pairProfit[p], 2), lx, y, pairPrClr, 7);
-         MakeLabel("mp_dd" + IntegerToString(p), "DD:" + DoubleToString(g_pairMaxDD[p], 2), rx, y, CLR_DIM, 7);
-         y += LINE_H;
-      }
-      y += 4;
-   }
-
-   // === SMC DASHBOARD ===
-   if(ShowSMCDashboard)
-   {
-      SMCDATA smc = AnalyzeSMC();
-
-      // Separator
-      ObjectCreate(0, "GUI_sep_smc", OBJ_RECTANGLE_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, "GUI_sep_smc", OBJPROP_XDISTANCE, lx);
-      ObjectSetInteger(0, "GUI_sep_smc", OBJPROP_YDISTANCE, y);
-      ObjectSetInteger(0, "GUI_sep_smc", OBJPROP_XSIZE, panelW - 12);
-      ObjectSetInteger(0, "GUI_sep_smc", OBJPROP_YSIZE, 1);
-      ObjectSetInteger(0, "GUI_sep_smc", OBJPROP_BGCOLOR, CLR_BORDER);
-      ObjectSetInteger(0, "GUI_sep_smc", OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, "GUI_sep_smc", OBJPROP_HIDDEN, true);
-      y += 5;
-
-      MakeLabel("hdr_smc", "SMC ANALYSIS", lx, y, C'100,200,255', 7, "Arial Bold");
-      y += LINE_H + 1;
-
-      // Market Structure
-      if(ShowMarketStructure)
-      {
-         color structClr = smc.structure == "BULLISH" ? CLR_PROFIT : smc.structure == "BEARISH" ? CLR_LOSS : CLR_DIM;
-         MakeLabel("lbl_struct", "Structure", lx, y, CLR_DIM);
-         MakeLabel("val_struct", smc.structure, rx, y, structClr);
-         y += LINE_H;
-
-         color biasClr = smc.bias == "BUY" ? CLR_BUY : smc.bias == "SELL" ? CLR_SELL : CLR_DIM;
-         MakeLabel("lbl_bias", "Bias", lx, y, CLR_DIM);
-         MakeLabel("val_bias", smc.bias, rx, y, biasClr);
-         y += LINE_H;
-      }
-
-      // Order Blocks
-      if(ShowOrderBlocks)
-      {
-         MakeLabel("lbl_ob", "OB", lx, y, CLR_DIM);
-         string obText = IntegerToString(smc.obCount);
-         if(smc.obSupport > 0) obText += " (S:" + DoubleToString(smc.obSupport, _Digits) + ")";
-         MakeLabel("val_ob", obText, rx, y, smc.obCount > 0 ? CLR_ACCENT : CLR_DIM);
-         y += LINE_H;
-      }
-
-      // Fair Value Gaps
-      if(ShowFVG)
-      {
-         MakeLabel("lbl_fvg", "FVG", lx, y, CLR_DIM);
-         string fvgText = IntegerToString(smc.fvgCount);
-         if(smc.fvgHigh > 0) fvgText += " (H:" + DoubleToString(smc.fvgHigh, _Digits) + ")";
-         MakeLabel("val_fvg", fvgText, rx, y, smc.fvgCount > 0 ? CLR_ACCENT : CLR_DIM);
-         y += LINE_H;
-      }
-
-      // Break of Structure
-      if(ShowBOS)
-      {
-         MakeLabel("lbl_bos", "BOS", lx, y, CLR_DIM);
-         MakeLabel("val_bos", IntegerToString(smc.bosCount), rx, y, smc.bosCount > 0 ? CLR_ACCENT : CLR_DIM);
-         y += LINE_H;
-      }
-
-      // Liquidity
-      if(ShowLiquidity)
-      {
-         MakeLabel("lbl_liq", "Liquidity", lx, y, CLR_DIM);
-         string liqText = "";
-         if(smc.eqhCount > 0) liqText += IntegerToString(smc.eqhCount) + "EQH";
-         if(smc.eqlCount > 0) liqText += (liqText != "" ? " " : "") + IntegerToString(smc.eqlCount) + "EQL";
-         if(liqText == "") liqText = "NONE";
-         MakeLabel("val_liq", liqText, rx, y, (smc.eqhCount + smc.eqlCount) > 0 ? CLR_ACCENT : CLR_DIM);
-         y += LINE_H;
-      }
-
-      y += 4;
-   }
-
-   // === ICT DASHBOARD ===
-   if(ShowICTDashboard)
-   {
-      ICTDATA ict = AnalyzeICT();
-
-      // Separator
-      ObjectCreate(0, "GUI_sep_ict", OBJ_RECTANGLE_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, "GUI_sep_ict", OBJPROP_XDISTANCE, lx);
-      ObjectSetInteger(0, "GUI_sep_ict", OBJPROP_YDISTANCE, y);
-      ObjectSetInteger(0, "GUI_sep_ict", OBJPROP_XSIZE, panelW - 12);
-      ObjectSetInteger(0, "GUI_sep_ict", OBJPROP_YSIZE, 1);
-      ObjectSetInteger(0, "GUI_sep_ict", OBJPROP_BGCOLOR, C'80,160,220');
-      ObjectSetInteger(0, "GUI_sep_ict", OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, "GUI_sep_ict", OBJPROP_HIDDEN, true);
-      y += 5;
-
-      MakeLabel("hdr_ict", "ICT ANALYSIS", lx, y, C'80,180,255', 7, "Arial Bold");
-      y += LINE_H + 1;
-
-      // Kill Zone Status
-      if(ShowKillZones)
-      {
-         color kzClr = ict.killZoneStatus == "ACTIVE" ? C'0,200,150' : CLR_DIM;
-         string kzText = ict.killZone;
-         if(ict.killZoneStatus == "ACTIVE")
-            kzText += " (" + IntegerToString(ict.killZoneMinsLeft) + "m)";
-         else if(ict.killZoneStatus == "UPCOMING")
-            kzText += " (>" + IntegerToString(ict.killZoneMinsLeft) + "m)";
-         MakeLabel("lbl_kz", "KillZone", lx, y, CLR_DIM);
-         MakeLabel("val_kz", kzText, rx, y, kzClr);
-         y += LINE_H;
-      }
-
-      // Daily Bias
-      if(ShowDailyBias)
-      {
-         color biasClr = ict.dailyBias == "BULLISH" ? CLR_PROFIT : ict.dailyBias == "BEARISH" ? CLR_LOSS : CLR_DIM;
-         MakeLabel("lbl_dbias", "DailyBias", lx, y, CLR_DIM);
-         MakeLabel("val_dbias", ict.dailyBias, rx, y, biasClr);
-         y += LINE_H;
-      }
-
-      // Market Structure Shift
-      if(ShowMSS)
-      {
-         color mssClr = ict.mss == "BULLISH_MSS" ? CLR_PROFIT : ict.mss == "BEARISH_MSS" ? CLR_LOSS : CLR_DIM;
-         string mssText = ict.mss;
-         if(ict.mss == "NONE") mssText = "---";
-         MakeLabel("lbl_mss", "MSS", lx, y, CLR_DIM);
-         MakeLabel("val_mss", mssText, rx, y, mssClr);
-         y += LINE_H;
-      }
-
-      // Premium/Discount Zone
-      if(ShowPremiumDiscount)
-      {
-         color pdClr = ict.pdZone == "PREMIUM" ? CLR_SELL : ict.pdZone == "DISCOUNT" ? CLR_BUY : CLR_DIM;
-         string pdText = ict.pdZone + " " + DoubleToString(ict.pdLevel, 0) + "%";
-         MakeLabel("lbl_pd", "P/D Zone", lx, y, CLR_DIM);
-         MakeLabel("val_pd", pdText, rx, y, pdClr);
-         y += LINE_H;
-
-         // Show equilibrium level
-         if(ict.equilibrium > 0)
-         {
-            MakeLabel("lbl_eq_ict", "Equil", lx, y, CLR_DIM, 7);
-            MakeLabel("val_eq_ict", DoubleToString(ict.equilibrium, _Digits), rx, y, CLR_DIM, 7);
-            y += LINE_H;
-         }
-      }
-
-      // OTE (Optimal Trade Entry)
-      if(ShowOTE)
-      {
-         color oteClr = ict.oteStatus == "IN_OTE" ? CLR_ACCENT : CLR_DIM;
-         string oteText = ict.oteStatus;
-         if(ict.oteStatus == "IN_OTE")
-            oteText = "IN ZONE";
-         MakeLabel("lbl_ote", "OTE", lx, y, CLR_DIM);
-         MakeLabel("val_ote", oteText, rx, y, oteClr);
-         y += LINE_H;
-
-         if(ict.oteHigh > 0)
-         {
-            MakeLabel("lbl_ote_range", "", lx, y, CLR_DIM, 7);
-            string oteRange = DoubleToString(ict.oteLow, _Digits) + " - " + DoubleToString(ict.oteHigh, _Digits);
-            MakeLabel("val_ote_range", oteRange, rx, y, CLR_DIM, 7);
-            y += LINE_H;
-         }
-      }
-
-      // ICT Order Blocks
-      if(ShowICTOrderBlocks)
-      {
-         color obClr = ict.ictOBType == "BULLISH_OB" ? CLR_BUY : ict.ictOBType == "BEARISH_OB" ? CLR_SELL : CLR_DIM;
-         string obText = IntegerToString(ict.ictOBCount);
-         if(ict.ictOBType != "NONE") obText += " " + ict.ictOBType;
-         MakeLabel("lbl_ict_ob", "OB", lx, y, CLR_DIM);
-         MakeLabel("val_ict_ob", obText, rx, y, obClr);
-         y += LINE_H;
-      }
-
-      // ICT Fair Value Gaps
-      if(ShowICTFVG)
-      {
-         color fvgClr = ict.ictFVGType == "BULLISH_FVG" ? CLR_BUY : ict.ictFVGType == "BEARISH_FVG" ? CLR_SELL : CLR_DIM;
-         string fvgText = IntegerToString(ict.ictFVGCount);
-         if(ict.ictFVGType != "NONE") fvgText += " " + ict.ictFVGType;
-         MakeLabel("lbl_ict_fvg", "FVG", lx, y, CLR_DIM);
-         MakeLabel("val_ict_fvg", fvgText, rx, y, fvgClr);
-         y += LINE_H;
-      }
-
-      // ICT Liquidity
-      if(ShowICTLiquidity)
-      {
-         color liqClr = ict.ictLiquidity != "NONE" ? CLR_ACCENT : CLR_DIM;
-         string liqText = ict.ictLiquidity;
-         if(liqText == "NONE") liqText = "---";
-         MakeLabel("lbl_ict_liq", "Liquidity", lx, y, CLR_DIM);
-         MakeLabel("val_ict_liq", liqText, rx, y, liqClr);
-         y += LINE_H;
-      }
-
-      // Liquidity Sweeps
-      if(ShowLiquiditySweep)
-      {
-         color sweepClr = ict.ictLiqSweep > 0 ? CLR_LOSS : CLR_DIM;
-         MakeLabel("lbl_sweep", "Sweeps", lx, y, CLR_DIM);
-         MakeLabel("val_sweep", IntegerToString(ict.ictLiqSweep), rx, y, sweepClr);
-         y += LINE_H;
-      }
-
-      // Displacement
-      if(ShowDisplacement)
-      {
-         color dispClr = ict.displacement == "BULLISH_DISP" ? CLR_PROFIT : ict.displacement == "BEARISH_DISP" ? CLR_LOSS : CLR_DIM;
-         string dispText = ict.displacement;
-         if(dispText == "NONE") dispText = "---";
-         MakeLabel("lbl_disp", "Displace", lx, y, CLR_DIM);
-         MakeLabel("val_disp", dispText, rx, y, dispClr);
-         y += LINE_H;
-      }
-
-      // Swing High/Low
-      if(ict.swingHigh > 0)
-      {
-         MakeLabel("lbl_sh", "SwingHi", lx, y, CLR_DIM, 7);
-         MakeLabel("val_sh", DoubleToString(ict.swingHigh, _Digits), rx, y, CLR_DIM, 7);
-         y += LINE_H;
-      }
-      if(ict.swingLow > 0)
-      {
-         MakeLabel("lbl_sl", "SwingLo", lx, y, CLR_DIM, 7);
-         MakeLabel("val_sl", DoubleToString(ict.swingLow, _Digits), rx, y, CLR_DIM, 7);
-         y += LINE_H;
-      }
-
-      y += 4;
-   }
-
-   // === BUTTONS ===
-   int btnW = panelW - 12;
+   // Buttons in Panel 1
+   int btnW = contentW;
    int halfW = (btnW - BTN_GAP) / 2;
 
-   // Pause
    if(g_manualPaused)
       MakeButton("Pause", "RESUME TRADING", lx, y, btnW, C'0,140,70');
    else
       MakeButton("Pause", "PAUSE TRADING", lx, y, btnW, C'180,70,30');
    y += BTN_H + BTN_GAP;
 
-   // Close buttons - 2 columns
    MakeButton("ClosePair", "CLOSE PAIR", lx, y, halfW, C'180,40,40');
    MakeButton("CloseAll", "CLOSE ALL", lx + halfW + BTN_GAP, y, halfW, C'140,30,30');
    y += BTN_H + BTN_GAP;
@@ -4563,18 +4346,226 @@ void DisplayInfo()
    y += BTN_H + BTN_GAP;
 
    MakeButton("DeletePending", "DELETE PENDING", lx, y, btnW, C'80,80,90');
-   y += BTN_H + 4;
 
-   ChartRedraw(0);
+   // ========== DRAW PANEL 2 (if needed) ==========
+   if(p2H > 40)
+   {
+      MakePanel("BG2", p2x, p2y, panelW, p2H);
+      int lx2 = p2x + 6;
+      int rx2 = lx2 + 90;
+      int y2 = p2y + 6;
 
-   // Comment fallback - always visible on chart top-left
-   double dHigh = iHigh(_Symbol, PERIOD_D1, 0);
-   double dLow = iLow(_Symbol, PERIOD_D1, 0);
-   double dayR = (dHigh - dLow) / _Point / (double)g_pointDivider;
-   double atrV = GetATRValue();
-   Comment("ATR: " + DoubleToString(atrV, _Digits) +
-           " | Range: " + DoubleToString(dayR, 1) +
-           " | Point: " + DoubleToString(_Point, _Digits));
+      // Multi-Pair
+      if(Use_MultiPair && g_pairCount > 0)
+      {
+         CalculateMultiPairStats();
+         DrawSeparator("sep_mp", lx2, y2, contentW, CLR_BORDER);
+         y2 += 5;
+         MakeLabel("hdr_mp", "MULTI-PAIR", lx2, y2, CLR_ACCENT, 7, "Arial Bold");
+         y2 += LINE_H + 1;
+
+         for(int p = 0; p < g_pairCount; p++)
+         {
+            MakeLabel("mp_name" + IntegerToString(p), g_pairList[p], lx2, y2, CLR_DIM, 7);
+            MakeLabel("mp_lots" + IntegerToString(p), DoubleToString(g_pairLots[p], 2) + "L", rx2, y2, CLR_TEXT, 7);
+            y2 += LINE_H;
+
+            string bsStr = IntegerToString(g_pairBuyCount[p]) + "B/" + IntegerToString(g_pairSellCount[p]) + "S";
+            MakeLabel("mp_bs" + IntegerToString(p), bsStr, lx2, y2, CLR_DIM, 7);
+            y2 += LINE_H;
+
+            color pairPrClr = g_pairProfit[p] >= 0 ? CLR_PROFIT : CLR_LOSS;
+            MakeLabel("mp_pr" + IntegerToString(p), DoubleToString(g_pairProfit[p], 2), lx2, y2, pairPrClr, 7);
+            MakeLabel("mp_dd" + IntegerToString(p), "DD:" + DoubleToString(g_pairMaxDD[p], 2), rx2, y2, CLR_DIM, 7);
+            y2 += LINE_H;
+         }
+         y2 += 2;
+      }
+
+      // SMC
+      if(ShowSMCDashboard)
+      {
+         SMCDATA smc = AnalyzeSMC();
+         DrawSeparator("sep_smc", lx2, y2, contentW, CLR_BORDER);
+         y2 += 5;
+         MakeLabel("hdr_smc", "SMC ANALYSIS", lx2, y2, C'100,200,255', 7, "Arial Bold");
+         y2 += LINE_H + 1;
+
+         if(ShowMarketStructure)
+         {
+            color structClr = smc.structure == "BULLISH" ? CLR_PROFIT : smc.structure == "BEARISH" ? CLR_LOSS : CLR_DIM;
+            MakeLabel("lbl_struct", "Structure", lx2, y2, CLR_DIM);
+            MakeLabel("val_struct", smc.structure, rx2, y2, structClr);
+            y2 += LINE_H;
+
+            color biasClr = smc.bias == "BUY" ? CLR_BUY : smc.bias == "SELL" ? CLR_SELL : CLR_DIM;
+            MakeLabel("lbl_bias", "Bias", lx2, y2, CLR_DIM);
+            MakeLabel("val_bias", smc.bias, rx2, y2, biasClr);
+            y2 += LINE_H;
+         }
+         if(ShowOrderBlocks)
+         {
+            MakeLabel("lbl_ob", "OB", lx2, y2, CLR_DIM);
+            string obText = IntegerToString(smc.obCount);
+            if(smc.obSupport > 0) obText += " (S:" + DoubleToString(smc.obSupport, _Digits) + ")";
+            MakeLabel("val_ob", obText, rx2, y2, smc.obCount > 0 ? CLR_ACCENT : CLR_DIM);
+            y2 += LINE_H;
+         }
+         if(ShowFVG)
+         {
+            MakeLabel("lbl_fvg", "FVG", lx2, y2, CLR_DIM);
+            string fvgText = IntegerToString(smc.fvgCount);
+            if(smc.fvgHigh > 0) fvgText += " (H:" + DoubleToString(smc.fvgHigh, _Digits) + ")";
+            MakeLabel("val_fvg", fvgText, rx2, y2, smc.fvgCount > 0 ? CLR_ACCENT : CLR_DIM);
+            y2 += LINE_H;
+         }
+         if(ShowBOS)
+         {
+            MakeLabel("lbl_bos", "BOS", lx2, y2, CLR_DIM);
+            MakeLabel("val_bos", IntegerToString(smc.bosCount), rx2, y2, smc.bosCount > 0 ? CLR_ACCENT : CLR_DIM);
+            y2 += LINE_H;
+         }
+         if(ShowLiquidity)
+         {
+            MakeLabel("lbl_liq", "Liquidity", lx2, y2, CLR_DIM);
+            string liqText = "";
+            if(smc.eqhCount > 0) liqText += IntegerToString(smc.eqhCount) + "EQH";
+            if(smc.eqlCount > 0) liqText += (liqText != "" ? " " : "") + IntegerToString(smc.eqlCount) + "EQL";
+            if(liqText == "") liqText = "NONE";
+            MakeLabel("val_liq", liqText, rx2, y2, (smc.eqhCount + smc.eqlCount) > 0 ? CLR_ACCENT : CLR_DIM);
+            y2 += LINE_H;
+         }
+         y2 += 2;
+      }
+
+      // ICT
+      if(ShowICTDashboard)
+      {
+         ICTDATA ict = AnalyzeICT();
+         DrawSeparator("sep_ict", lx2, y2, contentW, C'80,160,220');
+         y2 += 5;
+         MakeLabel("hdr_ict", "ICT ANALYSIS", lx2, y2, C'80,180,255', 7, "Arial Bold");
+         y2 += LINE_H + 1;
+
+         if(ShowKillZones)
+         {
+            color kzClr = ict.killZoneStatus == "ACTIVE" ? C'0,200,150' : CLR_DIM;
+            string kzText = ict.killZone;
+            if(ict.killZoneStatus == "ACTIVE")
+               kzText += " (" + IntegerToString(ict.killZoneMinsLeft) + "m)";
+            else if(ict.killZoneStatus == "UPCOMING")
+               kzText += " (>" + IntegerToString(ict.killZoneMinsLeft) + "m)";
+            MakeLabel("lbl_kz", "KillZone", lx2, y2, CLR_DIM);
+            MakeLabel("val_kz", kzText, rx2, y2, kzClr);
+            y2 += LINE_H;
+         }
+         if(ShowDailyBias)
+         {
+            color biasClr = ict.dailyBias == "BULLISH" ? CLR_PROFIT : ict.dailyBias == "BEARISH" ? CLR_LOSS : CLR_DIM;
+            MakeLabel("lbl_dbias", "DailyBias", lx2, y2, CLR_DIM);
+            MakeLabel("val_dbias", ict.dailyBias, rx2, y2, biasClr);
+            y2 += LINE_H;
+         }
+         if(ShowMSS)
+         {
+            color mssClr = ict.mss == "BULLISH_MSS" ? CLR_PROFIT : ict.mss == "BEARISH_MSS" ? CLR_LOSS : CLR_DIM;
+            string mssText = ict.mss;
+            if(ict.mss == "NONE") mssText = "---";
+            MakeLabel("lbl_mss", "MSS", lx2, y2, CLR_DIM);
+            MakeLabel("val_mss", mssText, rx2, y2, mssClr);
+            y2 += LINE_H;
+         }
+         if(ShowPremiumDiscount)
+         {
+            color pdClr = ict.pdZone == "PREMIUM" ? CLR_SELL : ict.pdZone == "DISCOUNT" ? CLR_BUY : CLR_DIM;
+            string pdText = ict.pdZone + " " + DoubleToString(ict.pdLevel, 0) + "%";
+            MakeLabel("lbl_pd", "P/D Zone", lx2, y2, CLR_DIM);
+            MakeLabel("val_pd", pdText, rx2, y2, pdClr);
+            y2 += LINE_H;
+
+            if(ict.equilibrium > 0)
+            {
+               MakeLabel("lbl_eq_ict", "Equil", lx2, y2, CLR_DIM, 7);
+               MakeLabel("val_eq_ict", DoubleToString(ict.equilibrium, _Digits), rx2, y2, CLR_DIM, 7);
+               y2 += LINE_H;
+            }
+         }
+         if(ShowOTE)
+         {
+            color oteClr = ict.oteStatus == "IN_OTE" ? CLR_ACCENT : CLR_DIM;
+            string oteText = ict.oteStatus;
+            if(ict.oteStatus == "IN_OTE") oteText = "IN ZONE";
+            MakeLabel("lbl_ote", "OTE", lx2, y2, CLR_DIM);
+            MakeLabel("val_ote", oteText, rx2, y2, oteClr);
+            y2 += LINE_H;
+
+            if(ict.oteHigh > 0)
+            {
+               string oteRange = DoubleToString(ict.oteLow, _Digits) + " - " + DoubleToString(ict.oteHigh, _Digits);
+               MakeLabel("lbl_ote_range", "", lx2, y2, CLR_DIM, 7);
+               MakeLabel("val_ote_range", oteRange, rx2, y2, CLR_DIM, 7);
+               y2 += LINE_H;
+            }
+         }
+         if(ShowICTOrderBlocks)
+         {
+            color obClr = ict.ictOBType == "BULLISH_OB" ? CLR_BUY : ict.ictOBType == "BEARISH_OB" ? CLR_SELL : CLR_DIM;
+            string obText = IntegerToString(ict.ictOBCount);
+            if(ict.ictOBType != "NONE") obText += " " + ict.ictOBType;
+            MakeLabel("lbl_ict_ob", "OB", lx2, y2, CLR_DIM);
+            MakeLabel("val_ict_ob", obText, rx2, y2, obClr);
+            y2 += LINE_H;
+         }
+         if(ShowICTFVG)
+         {
+            color fvgClr = ict.ictFVGType == "BULLISH_FVG" ? CLR_BUY : ict.ictFVGType == "BEARISH_FVG" ? CLR_SELL : CLR_DIM;
+            string fvgText = IntegerToString(ict.ictFVGCount);
+            if(ict.ictFVGType != "NONE") fvgText += " " + ict.ictFVGType;
+            MakeLabel("lbl_ict_fvg", "FVG", lx2, y2, CLR_DIM);
+            MakeLabel("val_ict_fvg", fvgText, rx2, y2, fvgClr);
+            y2 += LINE_H;
+         }
+         if(ShowICTLiquidity)
+         {
+            color liqClr = ict.ictLiquidity != "NONE" ? CLR_ACCENT : CLR_DIM;
+            string liqText = ict.ictLiquidity;
+            if(liqText == "NONE") liqText = "---";
+            MakeLabel("lbl_ict_liq", "Liquidity", lx2, y2, CLR_DIM);
+            MakeLabel("val_ict_liq", liqText, rx2, y2, liqClr);
+            y2 += LINE_H;
+         }
+         if(ShowLiquiditySweep)
+         {
+            color sweepClr = ict.ictLiqSweep > 0 ? CLR_LOSS : CLR_DIM;
+            MakeLabel("lbl_sweep", "Sweeps", lx2, y2, CLR_DIM);
+            MakeLabel("val_sweep", IntegerToString(ict.ictLiqSweep), rx2, y2, sweepClr);
+            y2 += LINE_H;
+         }
+         if(ShowDisplacement)
+         {
+            color dispClr = ict.displacement == "BULLISH_DISP" ? CLR_PROFIT : ict.displacement == "BEARISH_DISP" ? CLR_LOSS : CLR_DIM;
+            string dispText = ict.displacement;
+            if(dispText == "NONE") dispText = "---";
+            MakeLabel("lbl_disp", "Displace", lx2, y2, CLR_DIM);
+            MakeLabel("val_disp", dispText, rx2, y2, dispClr);
+            y2 += LINE_H;
+         }
+         if(ict.swingHigh > 0)
+         {
+            MakeLabel("lbl_sh", "SwingHi", lx2, y2, CLR_DIM, 7);
+            MakeLabel("val_sh", DoubleToString(ict.swingHigh, _Digits), rx2, y2, CLR_DIM, 7);
+            y2 += LINE_H;
+         }
+         if(ict.swingLow > 0)
+         {
+            MakeLabel("lbl_sl", "SwingLo", lx2, y2, CLR_DIM, 7);
+            MakeLabel("val_sl", DoubleToString(ict.swingLow, _Digits), rx2, y2, CLR_DIM, 7);
+            y2 += LINE_H;
+         }
+      }
+   }
+
+    ChartRedraw(0);
 }
 
 //+------------------------------------------------------------------+
@@ -4996,9 +4987,12 @@ void ManagePairTrading(int idx)
          return;
       }
 
-      if(iVolume(g_pts[idx].symbol, g_currentTimeframe, 0) > 1) return;
+       // Fresh bar check using time-based approach for multi-pair
+       datetime barTime = iTime(g_pts[idx].symbol, g_currentTimeframe, 0);
+       if(g_pts[idx].freshBarTime == barTime) return;  // Same bar, skip
+       g_pts[idx].freshBarTime = barTime;
 
-      double close2 = iClose(g_pts[idx].symbol, g_currentTimeframe, 2);
+       double close2 = iClose(g_pts[idx].symbol, g_currentTimeframe, 2);
       double close1 = iClose(g_pts[idx].symbol, g_currentTimeframe, 1);
 
       g_pts[idx].lot = Lot;
