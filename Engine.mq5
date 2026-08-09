@@ -32,27 +32,27 @@ input group "=== General Settings ==="
 input string          Minimal_Deposit      = "$200";
 input string          Time_Frame           = "Time Frame M1";
 input string          Pairs                = "EurUsd";
-input int             MagicNumber         = 1111111;
+input int             MagicNumber         = 222;
 input bool            Use_MultiPair        = true;     // Enable Multi-Pair Dashboard
-input string          MultiPairs           = "BTCUSDm,EURUSDm,XAUUSDm"; // Pairs: comma-separated
+input string          MultiPairs           = "BTCUSDm, EURUSDm, XAUUSD"; // Pairs: comma-separated
 
 input group "=== Lot Settings ==="
 input bool            Use_Fixed_Lot       = false;
 input double          Lot                  = 0.01;
 input double          LotMultiplikator    = 1.21;
-input int             LotMode             = 1;  // 0=Fixed, 1=Multiplier, 2=Recovery
+input int             LotMode             = 1;        // 0=Fixed, 1=Multiplier, 2=Recovery
 
 input group "=== Trade Settings ==="
-input double          TakeProfit          = 300;
-input double          Step                = 21.0;
-input double          Averaging           = 1.0;
-input int             MaxTrades           = 31;
+input double          TakeProfit          = 80000;
+input double          Step                = 21000.0;
+input double          Averaging           = 1.21;
+input int             MaxTrades           = 100;
 input int             MinTradeDelaySec    = 60;       // Min seconds between trades
 
 input group "=== TP Multiplier ==="
-input bool            Use_TP_Multiplier   = true;    // Use TP Multiplier
-input double          TP_Multiplier       = 1.21;      // TP Multiplier per averaging level
-input int             TP_Max_Level        = 300;       // Max averaging level for TP calc
+input bool            Use_TP_Multiplier   = true;     // Use TP Multiplier
+input double          TP_Multiplier       = 1.21;     // TP Multiplier per averaging level
+input int             TP_Max_Level        = 80000;    // Max averaging level for TP calc
 input bool            Use_SeparateTP      = true;     // Show separate TP per side when hedged
 
 input group "=== Hidden TP & Daily Target ==="
@@ -81,33 +81,31 @@ input double          MaxDailyRange       = 20000;
 input bool            UseVolatilityFilter = true;
 input int             ATR_Period          = 14;
 input double          ATR_Multiplier      = 2.0;
-input bool            UseRangeFilter      = true;
+input bool            UseRangeFilter      = false;
 input double          RangeMinPips        = 10;
 input double          RangeMaxPips        = 200;
 
-input group "------======<<[  News Management  ]>>======------ "
-input bool            Filter_News         = true;     // Enable News Filter
-input string          info1               = " "; //---=== News Settings ===---
-input string          news_link           = "https://nfs.faireconomy.media/"; //--- News URL
-input int             min_before          = 5;    // Minutes Before News to close
-input int             min_before_zero     = 60;   // Minutes Before News to close with zero profit
-input int             min_after           = 45;   // Minutes After News to halt
+input group "=== News Management ==="
+input bool            Filter_News         = false;    // Enable News Filter
+input string          news_link           = "https://nfs.faireconomy.media/";
+input int             min_before          = 5;        // Minutes Before News to close
+input int             min_before_zero     = 60;       // Minutes Before News close with zero profit
+input int             min_after           = 45;       // Minutes After News to halt
 input bool            include_high        = true;     // Include high impact
 input bool            include_medium      = false;    // Include medium impact
 input bool            include_low         = false;    // Include low impact
 input bool            use_title           = true;     // Filter News based on title
-input string          title_phrase        = "Non-Farm,Unemployment,ISM,PMI,CPI,FOMC,Retail Sales,Final GDP q/q,Core PCE Price Index m/m,Empire State Manufacturing Index,Advance GDP q/q,JOLTS"; // Title keywords (comma separated)
-input int             news_update_hour    = 2;    // Update time interval (in hours)
-input int             symbol_type         = 0;    // 0=Use chart symbol, 1=Custom currencies
-input string          news_symbols        = "USD,EUR,GBP,JPY,CAD,CHF"; // Custom Currencies
-input bool            close_only_news_pair = false; // Only close orders of the event currency
+input string          title_phrase        = "Non-Farm,Unemployment,ISM,PMI,CPI,FOMC,Retail Sales,Final GDP q/q,Core PCE Price Index m/m,Empire State Manufacturing Index,Advance GDP q/q,JOLTS";
+input int             news_update_hour    = 2;        // Update time interval (in hours)
+input int             symbol_type         = 0;        // 0=Use chart symbol, 1=Custom currencies
+input string          news_symbols        = "USD,EUR,GBP,JPY,CAD,CHF";
+input bool            close_only_news_pair = false;   // Only close orders of the event currency
 input bool            draw_news_lines     = true;     // Draw News Lines on chart
-input color           Line_Color          = clrRed;   // Lines Color
-input ENUM_LINE_STYLE Line_Style          = STYLE_DOT;// Lines Style
-input int             Line_Width          = 1;        // Line Width
+input color           Line_Color          = clrRed;
+input ENUM_LINE_STYLE Line_Style          = STYLE_DOT;
+input int             Line_Width          = 1;
 
-input group "------======<<[  Order Management  ]>>======------ "
-input string          info2               = " "; //---=== Order Management ===---
+input group "=== Order Management ==="
 input bool            stop_algo           = true;     // Stop Auto trading during news
 input bool            close_open          = true;     // Close all open trades
 input bool            close_pending       = true;     // Delete all Pending orders
@@ -115,137 +113,137 @@ input bool            close_zero          = false;    // Close all trades with p
 input double          close_profit        = 1;        // Profit for closing all trades (in $)
 input bool            close_charts        = false;    // Close all Charts
 
-input group "------======<<[  Settings  ]>>======------ "
-input string          info3               = " "; //---=== Settings ===---
+input group "=== Settings ==="
 input bool            send_notif          = true;     // Send notification
 input bool            send_alert          = true;     // Send Alert
 input int             delay               = 5;        // Delay if something goes wrong (in seconds)
 
-input group "=== HEDGE SETTINGS ==="
+input group "=== Hedge Settings ==="
 input bool            Use_Hedging         = true;
+input int             HedgeMode           = 3;        // 0=Distance, 1=Immediate, 2=ATR Vol, 3=Candle Close
 input double          HedgeDistancePips   = 30;
 input double          HedgeLotMultiplier  = 1.21;
-input double          HedgeProfitTarget   = 300.0;
-input int             MaxHedgeCount       = 3;
-input double          HedgeStepPips       = 30;
+input double          HedgeProfitTarget   = 80000.0;
+input int             MaxHedgeCount       = 100;
+input double          HedgeStepPips       = 30000;
 input bool            Use_Hedge_TP        = true;
-input double          HedgeTakeProfit     = 300.0;
+input double          HedgeTakeProfit     = 80000.0;
 
-input group "=== TRAILING STOP SETTINGS ==="
-input bool            Use_Trailing_Stop   = false;
-input int             TrailingMode        = 0;         // 0=Fixed Pips, 1=ATR Based
+input group "=== Trailing Stop ==="
+input bool            Use_Trailing_Stop   = true;
+input int             TrailingMode        = 1;        // 0=Fixed Pips, 1=ATR Based
 input double          TrailingStartPips   = 20;
 input double          TrailingStepPips    = 5;
 input double          TrailingDistancePips = 15;
-input int             Trail_ATR_Period     = 14;        // Trail ATR Period
-input double          Trail_ATR_Multiplier = 1.5;       // Trail ATR Multiplier for distance
-input ENUM_TIMEFRAMES Trail_ATR_Timeframe  = PERIOD_H1; // Trail ATR Timeframe
+input int             Trail_ATR_Period    = 14;
+input double          Trail_ATR_Multiplier = 1.5;
+input ENUM_TIMEFRAMES Trail_ATR_Timeframe = PERIOD_H1;
 input bool            Use_Breakeven       = false;
 input double          BreakevenStartPips  = 15;
 input double          BreakevenProfitPips = 5;
 
-input group "=== SMART TRAIL SETTINGS ==="
-input bool            Use_SmartTrail      = false;      // Enable Smart Trail
-input bool            SmartTrail_BreakEven = true;      // Stage 2: Break-even
-input double          SmartTrail_BE_R     = 0.8;        // Break-even at +X R
-input double          SmartTrail_BE_Buffer = 5;         // BE buffer in points
-input bool            SmartTrail_ProfitLock = true;     // Stage 3: Profit lock
-input double          SmartTrail_PL_R     = 1.2;        // Profit lock activates at +X R
-input double          SmartTrail_Locked_R = 0.4;        // Locked profit in R
-input bool            SmartTrail_ATR      = true;       // Stage 4: ATR trailing
-input int             SmartTrail_ATR_Period = 14;       // ATR period
-input double          SmartTrail_ATR_Normal = 2.0;      // Normal trend ATR multiplier
-input double          SmartTrail_ATR_Strong = 2.5;      // Strong trend ATR multiplier
-input double          SmartTrail_ATR_Weak = 1.3;        // Weak trend ATR multiplier
-input bool            SmartTrail_Structure = true;      // Stage 7: Structure trail
-input int             SmartTrail_SwingLookback = 10;    // Swing lookback bars
-input double          SmartTrail_StructureBuf = 5;      // Structure buffer points
-input bool            SmartTrail_Chandelier = true;     // Stage 8: Extreme profit
-input double          SmartTrail_ChandelierR = 2.5;     // Chandelier ATR multiplier
-input double          SmartTrail_MinStep  = 10;         // Minimum trail step points
-input int             SmartTrail_ADX_Period = 14;       // ADX period for trend strength
-input double          SmartTrail_ADX_Strong = 25;       // ADX threshold for strong trend
-input double          SmartTrail_ADX_Weak = 20;         // ADX threshold for weak trend
+input group "=== Smart Trail ==="
+input bool            Use_SmartTrail      = true;     // Enable Smart Trail
+input bool            SmartTrail_BreakEven = true;     // Stage 2: Break-even
+input double          SmartTrail_BE_R     = 0.3;      // Break-even at +X R (lower = sooner)
+input double          SmartTrail_BE_Buffer = 5;       // BE buffer in points
+input bool            SmartTrail_ProfitLock = true;   // Stage 3: Profit lock
+input double          SmartTrail_PL_R     = 0.5;      // Profit lock activates at +X R (lower = sooner)
+input double          SmartTrail_Locked_R = 0.3;      // Locked profit in R
+input bool            SmartTrail_ATR      = true;     // Stage 4: ATR trailing
+input int             SmartTrail_ATR_Period = 14;     // ATR period
+input double          SmartTrail_ATR_Normal = 2.0;    // Normal trend ATR multiplier
+input double          SmartTrail_ATR_Strong = 2.5;    // Strong trend ATR multiplier
+input double          SmartTrail_ATR_Weak = 1.3;      // Weak trend ATR multiplier
+input bool            SmartTrail_Structure = true;    // Stage 7: Structure trail
+input int             SmartTrail_SwingLookback = 10;  // Swing lookback bars
+input double          SmartTrail_StructureBuf = 5;    // Structure buffer points
+input bool            SmartTrail_Chandelier = true;   // Stage 8: Extreme profit
+input double          SmartTrail_ChandelierR = 2.5;   // Chandelier ATR multiplier
+input double          SmartTrail_MinStep  = 10;       // Minimum trail step points
+input int             SmartTrail_ADX_Period = 14;     // ADX period for trend strength
+input double          SmartTrail_ADX_Strong = 25;     // ADX threshold for strong trend
+input double          SmartTrail_ADX_Weak = 20;       // ADX threshold for weak trend
 
-input group "=== PRICE % TRAIL SETTINGS ==="
-input bool            Use_PctTrail          = true;     // Enable Price % Trail
-input double          PctTrail_ActivateR    = 0.8;      // Activate trail at +X R
-input double          PctTrail_Trail_Normal = 0.30;     // Normal market trail %
-input double          PctTrail_Trail_Strong = 0.45;     // Strong trend trail %
-input double          PctTrail_Trail_Choppy = 0.15;     // Choppy market trail %
-input double          PctTrail_ADX_Strong   = 25;       // ADX > = strong trend
-input double          PctTrail_ADX_Choppy   = 20;       // ADX < = choppy
-input double          PctTrail_Lock_R1      = 1.0;      // Profit lock tier 1 R
-input double          PctTrail_Lock_P1      = 30;       // Profit lock tier 1 %
-input double          PctTrail_Lock_R2      = 1.5;      // Profit lock tier 2 R
-input double          PctTrail_Lock_P2      = 50;       // Profit lock tier 2 %
-input double          PctTrail_Lock_R3      = 2.0;      // Profit lock tier 3 R
-input double          PctTrail_Lock_P3      = 65;       // Profit lock tier 3 %
-input double          PctTrail_Lock_R4      = 3.0;      // Profit lock tier 4 R
-input double          PctTrail_Lock_P4      = 80;       // Profit lock tier 4 %
-input double          PctTrail_MinStep      = 10;       // Min trail step (points)
-input int             PctTrail_ADX_Period   = 14;       // ADX period for trend
+input group "=== Price % Trail ==="
+input bool            Use_PctTrail          = true;   // Enable Price % Trail
+input double          PctTrail_ActivateR    = 0.3;    // Activate trail at +X R
+input double          PctTrail_Trail_Normal = 0.30;   // Normal market trail %
+input double          PctTrail_Trail_Strong = 0.45;   // Strong trend trail %
+input double          PctTrail_Trail_Choppy = 0.15;   // Choppy market trail %
+input double          PctTrail_ADX_Strong   = 25;     // ADX > = strong trend
+input double          PctTrail_ADX_Choppy   = 20;     // ADX < = choppy
+input double          PctTrail_Lock_R1      = 1.0;    // Profit lock tier 1 R
+input double          PctTrail_Lock_P1      = 30;     // Profit lock tier 1 %
+input double          PctTrail_Lock_R2      = 1.5;    // Profit lock tier 2 R
+input double          PctTrail_Lock_P2      = 50;     // Profit lock tier 2 %
+input double          PctTrail_Lock_R3      = 2.0;    // Profit lock tier 3 R
+input double          PctTrail_Lock_P3      = 65;     // Profit lock tier 3 %
+input double          PctTrail_Lock_R4      = 3.0;    // Profit lock tier 4 R
+input double          PctTrail_Lock_P4      = 80;     // Profit lock tier 4 %
+input double          PctTrail_MinStep      = 10;     // Min trail step (points)
+input int             PctTrail_ADX_Period   = 14;     // ADX period for trend
 
-input group "=== EQUITY ATR TRAIL ==="
-input bool                  Use_EquityATRTrail  = false;   // Enable Equity ATR Trail
-input ENUM_ATR_MULT_START   EquityATR_StartMult = ATR_MULT_2_0; // Start trail after equity drops ATR × this from peak
-input ENUM_ATR_MULT_CLOSE   EquityATR_CloseMult = ATR_CLOSE_3_0; // Close when equity drops ATR × this from peak
-input int                   EquityATR_CloseSide = 3;        // 0=All, 1=Buys, 2=Sells, 3=Profitable side
-input bool                  EquityATR_CloseOnNewPeak = true; // Close all when equity makes new peak after trail
-input ENUM_TIMEFRAMES       EquityATR_Timeframe = PERIOD_H1; // ATR Timeframe for equity trail
-input int                   EquityATR_Period    = 14;        // ATR Period for equity trail
+input group "=== Equity ATR Trail ==="
+input bool                  Use_EquityATRTrail  = true;   // Enable Equity ATR Trail
+input ENUM_ATR_MULT_START   EquityATR_StartMult = ATR_MULT_1_0;
+input ENUM_ATR_MULT_CLOSE   EquityATR_CloseMult = ATR_CLOSE_3_0;
+input int                   EquityATR_CloseSide = 3;      // 0=All, 1=Buys, 2=Sells, 3=Profitable side
+input bool                  EquityATR_CloseOnNewPeak = true;
+input ENUM_TIMEFRAMES       EquityATR_Timeframe = PERIOD_H1;
+input int                   EquityATR_Period    = 14;
 
-input group "=== TIMEFRAME SWITCH ON DRAWDOWN ==="
-input bool            Use_DrawdownSwitch  = false;
-input double          DD_Low              = 5;        // DD% → switch to Mid TF
-input double          DD_High             = 10;       // DD% → switch to High TF
+input group "=== Timeframe Switch on Drawdown ==="
+input bool            Use_DrawdownSwitch  = true;
+input double          DD_Low              = 10;       // DD% → switch to Mid TF
+input double          DD_High             = 40;       // DD% → switch to High TF
 input ENUM_TIMEFRAMES Timeframe_Low       = PERIOD_CURRENT;
-input ENUM_TIMEFRAMES Timeframe_Mid       = PERIOD_M5;
-input ENUM_TIMEFRAMES Timeframe_High      = PERIOD_M15;
+input ENUM_TIMEFRAMES Timeframe_Mid       = PERIOD_M15;
+input ENUM_TIMEFRAMES Timeframe_High      = PERIOD_H1;
 input bool            Auto_Switch_Back    = true;
 
 input group "=== TimeOut Settings ==="
 input bool            Use_TimeOut         = false;
 input int             TimeOut_Hours       = 48;
 
-input group "=== SMC DASHBOARD ==="
-input bool            ShowSMCDashboard    = true;     // Show SMC Dashboard
-input int             SMC_Lookback        = 20;       // Bars to analyze
-input bool            ShowOrderBlocks     = true;     // Show Order Blocks
-input bool            ShowFVG             = true;     // Show Fair Value Gaps
-input bool            ShowBOS             = true;     // Show Break of Structure
-input bool            ShowLiquidity       = true;     // Show Liquidity Levels
-input bool            ShowMarketStructure = true;     // Show Market Structure
+input group "=== SMC Dashboard ==="
+input bool            ShowSMCDashboard    = true;
+input int             SMC_Lookback        = 20;
+input bool            ShowOrderBlocks     = true;
+input bool            ShowFVG             = true;
+input bool            ShowBOS             = true;
+input bool            ShowLiquidity       = true;
+input bool            ShowMarketStructure = true;
 
-input group "=== ICT DASHBOARD ==="
-input bool            ShowICTDashboard    = true;     // Show ICT Dashboard
-input int             ICT_Lookback        = 50;       // ICT Bars to analyze
-input bool            ShowKillZones       = true;     // Show Kill Zone Status
-input bool            ShowPremiumDiscount = true;     // Show Premium/Discount Zone
-input bool            ShowOTE             = true;     // Show Optimal Trade Entry
-input bool            ShowMSS             = true;     // Show Market Structure Shift
-input bool            ShowICTOrderBlocks  = true;     // Show ICT Order Blocks
-input bool            ShowICTFVG          = true;     // Show ICT Fair Value Gaps
-input bool            ShowICTLiquidity    = true;     // Show ICT Liquidity Levels
-input bool            ShowLiquiditySweep  = true;     // Show Liquidity Sweep Detection
-input bool            ShowDailyBias       = true;     // Show Daily Bias
-input bool            ShowDisplacement    = true;     // Show Displacement Detection
-input double          OTE_FibHigh         = 0.79;     // OTE Fibonacci High (0.79)
-input double          OTE_FibLow          = 0.618;    // OTE Fibonacci Low (0.618)
-input double          LiquidityTolerance  = 10;       // Liquidity Tolerance (pips)
-input double          DisplacementRatio   = 1.5;      // Displacement Body Ratio
+input group "=== ICT Dashboard ==="
+input bool            ShowICTDashboard    = true;
+input int             ICT_Lookback        = 50;
+input bool            ShowKillZones       = true;
+input bool            ShowPremiumDiscount = true;
+input bool            ShowOTE             = true;
+input bool            ShowMSS             = true;
+input bool            ShowICTOrderBlocks  = true;
+input bool            ShowICTFVG          = true;
+input bool            ShowICTLiquidity    = true;
+input bool            ShowLiquiditySweep  = true;
+input bool            ShowDailyBias       = true;
+input bool            ShowDisplacement    = true;
+input double          OTE_FibHigh         = 0.79;
+input double          OTE_FibLow          = 0.618;
+input double          LiquidityTolerance  = 10;
+input double          DisplacementRatio   = 1.5;
 
-input group "=== ICT CHART DRAWINGS ==="
-input bool            DrawICTOnChart      = true;     // Draw ICT Concepts on Chart
-input bool            DrawOB_OnChart      = true;     // Draw Order Blocks on Chart
-input bool            DrawFVG_OnChart     = true;     // Draw Fair Value Gaps on Chart
-input bool            DrawLiq_OnChart     = true;     // Draw Liquidity Levels on Chart
-input bool            DrawPDZ_OnChart     = true;     // Draw Premium/Discount Zone
-input bool            DrawOTE_OnChart     = true;     // Draw OTE Zone
-input bool            DrawKZ_OnChart      = true;     // Draw Kill Zone Lines
-input bool            DrawMSS_OnChart     = true;     // Draw MSS/BOS Labels
-input color           OB_BullColor        = C'0,100,200';   // Bullish OB Color
-input color           OB_BearColor        = C'200,50,50';    // Bearish OB Color
+input group "=== ICT Chart Drawings ==="
+input bool            DrawICTOnChart      = true;
+input bool            DrawOB_OnChart      = true;
+input bool            DrawFVG_OnChart     = true;
+input bool            DrawLiq_OnChart     = true;
+input bool            DrawPDZ_OnChart     = true;
+input bool            DrawOTE_OnChart     = true;
+input bool            DrawKZ_OnChart      = true;
+input bool            DrawMSS_OnChart     = true;
+input color           OB_BullColor        = C'0,100,200';
+input color           OB_BearColor        = C'200,50,50';
 input color           FVG_BullColor       = C'0,150,100';    // Bullish FVG Color
 input color           FVG_BearColor       = C'180,60,60';    // Bearish FVG Color
 input color           LiqColor            = C'255,200,0';    // Liquidity Line Color
@@ -690,10 +688,6 @@ void OnTick()
    if(_chkAsk <= 0 || _chkBid <= 0)
       return;
 
-   // Global cooldown after ANY server failure (60 seconds)
-   if(g_lastServerFailTime > 0 && TimeCurrent() - g_lastServerFailTime < 60)
-      return;
-
    // Recalculate manual ATR every tick
    CalculateManualATR();
 
@@ -795,23 +789,23 @@ void OnTick()
       return;
    }
 
-    // TRAILING STOP
-    if(Use_Trailing_Stop && g_totalCount > 0)
-    {
-       ManageTrailingStop();
-    }
+     // TRAILING STOP — trail each position independently
+     if(Use_Trailing_Stop && g_totalCount > 0)
+     {
+        ManageTrailingStop();
+     }
 
-    // SMART TRAIL
-    if(Use_SmartTrail && g_totalCount > 0)
-    {
-       ManageSmartTrail();
-    }
+     // SMART TRAIL — trail each position independently
+     if(Use_SmartTrail && g_totalCount > 0)
+     {
+        ManageSmartTrail();
+     }
 
-    // PRICE % TRAIL
-    if(Use_PctTrail && g_totalCount > 0)
-    {
-       ManagePctTrail();
-    }
+     // PRICE % TRAIL — trail each position independently
+     if(Use_PctTrail && g_totalCount > 0)
+     {
+        ManagePctTrail();
+     }
    
    // EQUITY ATR TRAIL (CLOSE ALL)
    if(Use_EquityATRTrail && g_totalCount > 0)
@@ -960,26 +954,49 @@ void OnTick()
             if(volumeOK)
             {
                // Original: check if price moved Step points from LAST order
-               // BUY-only: if ask dropped Step points from last buy → open BUY again
-               if(g_hasBuy && !g_hasSell)
-               {
-                  double dist = (g_lastBuyPrice - ask) / _Point;
-                  if(dist >= g_step)
-                  {
-                     shouldOpen = true;
-                     direction = 1; // Buy averaging
-                  }
-               }
-               // SELL-only: if bid rose Step points from last sell → open SELL again
-               else if(g_hasSell && !g_hasBuy)
-               {
-                  double dist = (bid - g_lastSellPrice) / _Point;
-                  if(dist >= g_step)
-                  {
-                     shouldOpen = true;
-                     direction = 2; // Sell averaging
-                  }
-               }
+                // BUY-only: if ask dropped Step points from last buy → open BUY again
+                // Skip if hedge should rebalance (need a SELL to balance)
+                if(g_hasBuy && !g_hasSell)
+                {
+                   bool hedgePending = false;
+                   if(HedgeMode == 1)
+                   {
+                      // Immediate mode: hedge if price below avg
+                      double ask2 = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                      hedgePending = (ask2 < g_buyAvgPrice);
+                   }
+
+                   if(!hedgePending)
+                   {
+                      double dist = (g_lastBuyPrice - ask) / _Point;
+                      if(dist >= g_step)
+                      {
+                         shouldOpen = true;
+                         direction = 1; // Buy averaging
+                      }
+                   }
+                }
+                // SELL-only: if bid rose Step points from last sell → open SELL again
+                // Skip if hedge should rebalance (need a BUY to balance)
+                else if(g_hasSell && !g_hasBuy)
+                {
+                   bool hedgePending = false;
+                   if(HedgeMode == 1)
+                   {
+                      // Immediate mode: hedge if price above avg
+                      hedgePending = (bid > g_sellAvgPrice);
+                   }
+
+                   if(!hedgePending)
+                   {
+                      double dist = (bid - g_lastSellPrice) / _Point;
+                      if(dist >= g_step)
+                      {
+                         shouldOpen = true;
+                         direction = 2; // Sell averaging
+                      }
+                   }
+                }
                // HEDGED (both buy and sell): run both algorithms independently
                else if(g_hasBuy && g_hasSell)
                {
@@ -1923,6 +1940,7 @@ void ManageHedge()
 {
    if(g_totalCount == 0) return;
 
+   // Both sides open — check combined profit target
    if(g_hasBuy && g_hasSell)
    {
       if(Use_Hedge_TP && g_totalProfit >= HedgeTakeProfit)
@@ -1933,12 +1951,48 @@ void ManageHedge()
       return;
    }
 
+   // BUY only → open hedge SELL
    if(g_hasBuy && !g_hasSell)
    {
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double distPips = (g_lastBuyPrice - ask) / _Point / 10.0;
+      bool shouldHedge = false;
 
-      if(distPips >= HedgeDistancePips && g_sellCount < MaxHedgeCount)
+      if(HedgeMode == 0)
+      {
+         // Mode 0: Distance-based
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double avgBuyDist = (g_buyAvgPrice - ask) / _Point / 10.0;
+         shouldHedge = (avgBuyDist >= HedgeDistancePips);
+      }
+      else if(HedgeMode == 1)
+      {
+         // Mode 1: Immediate — hedge as soon as price moves against us at all
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         shouldHedge = (ask < g_buyAvgPrice);
+      }
+      else if(HedgeMode == 2)
+      {
+         // Mode 2: ATR Volume — hedge when ATR spike (volatility expansion)
+         double atr[];
+         if(CopyBuffer(g_atrHandle, 0, 0, 2, atr) == 2)
+         {
+            double atrRatio = atr[0] / atr[1];
+            shouldHedge = (atrRatio > 1.5);
+         }
+      }
+      else if(HedgeMode == 3)
+      {
+         // Mode 3: Candle Close — same logic as original entry
+         // Only on fresh bar, close[2] < close[1] → SELL hedge
+         if(iVolume(_Symbol, g_currentTimeframe, 0) <= 1)
+         {
+            double close2 = iClose(_Symbol, g_currentTimeframe, 2);
+            double close1 = iClose(_Symbol, g_currentTimeframe, 1);
+            if(close2 < close1)
+               shouldHedge = true;
+         }
+      }
+
+      if(shouldHedge && g_sellCount < MaxHedgeCount)
       {
          double hedgeLot = NormalizeDouble(Lot * HedgeLotMultiplier, 2);
          double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -1948,51 +2002,70 @@ void ManageHedge()
          string comment = _Symbol + "-HEDGE-SELL-" + IntegerToString(g_sellCount + 1);
 
          if(trade.Sell(hedgeLot, _Symbol, bid, 0, 0, comment))
-            Print("HEDGE SELL: ", hedgeLot, " at ", bid);
+            Print("HEDGE SELL: lot=", hedgeLot, " at ", bid, " mode=", HedgeMode, " TF=", EnumToString(g_currentTimeframe));
          else
          {
             g_lastServerFailTime = TimeCurrent();
             Print("HEDGE SELL FAILED: lot=", hedgeLot, " bid=", bid, " err=", trade.ResultRetcode(), " msg=", trade.ResultRetcodeDescription());
          }
       }
-      else
-      {
-         static datetime hedgeSkipBuyLog = 0;
-         if(TimeCurrent() - hedgeSkipBuyLog > 30)
-         {
-            hedgeSkipBuyLog = TimeCurrent();
-            Print("HEDGE SKIP BUY: distPips=", DoubleToString(distPips, 1), " need=", DoubleToString(HedgeDistancePips, 1), " sellCount=", g_sellCount, " max=", MaxHedgeCount);
-         }
-      }
    }
+   // SELL only → open hedge BUY
    else if(g_hasSell && !g_hasBuy)
    {
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double distPips = (ask - g_lastSellPrice) / _Point / 10.0;
+      bool shouldHedge = false;
 
-      if(distPips >= HedgeDistancePips && g_buyCount < MaxHedgeCount)
+      if(HedgeMode == 0)
+      {
+         // Mode 0: Distance-based
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double avgSellDist = (ask - g_sellAvgPrice) / _Point / 10.0;
+         shouldHedge = (avgSellDist >= HedgeDistancePips);
+      }
+      else if(HedgeMode == 1)
+      {
+         // Mode 1: Immediate — hedge as soon as price moves against us at all
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         shouldHedge = (ask > g_sellAvgPrice);
+      }
+      else if(HedgeMode == 2)
+      {
+         // Mode 2: ATR Volume — hedge when ATR spike
+         double atr[];
+         if(CopyBuffer(g_atrHandle, 0, 0, 2, atr) == 2)
+         {
+            double atrRatio = atr[0] / atr[1];
+            shouldHedge = (atrRatio > 1.5);
+         }
+      }
+      else if(HedgeMode == 3)
+      {
+         // Mode 3: Candle Close — same logic as original entry
+         // Only on fresh bar, close[2] > close[1] → BUY hedge
+         if(iVolume(_Symbol, g_currentTimeframe, 0) <= 1)
+         {
+            double close2 = iClose(_Symbol, g_currentTimeframe, 2);
+            double close1 = iClose(_Symbol, g_currentTimeframe, 1);
+            if(close2 > close1)
+               shouldHedge = true;
+         }
+      }
+
+      if(shouldHedge && g_buyCount < MaxHedgeCount)
       {
          double hedgeLot = NormalizeDouble(Lot * HedgeLotMultiplier, 2);
          double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
          if(hedgeLot < minLot) hedgeLot = minLot;
 
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          string comment = _Symbol + "-HEDGE-BUY-" + IntegerToString(g_buyCount + 1);
 
          if(trade.Buy(hedgeLot, _Symbol, ask, 0, 0, comment))
-            Print("HEDGE BUY: ", hedgeLot, " at ", ask);
+            Print("HEDGE BUY: lot=", hedgeLot, " at ", ask, " mode=", HedgeMode, " TF=", EnumToString(g_currentTimeframe));
          else
          {
             g_lastServerFailTime = TimeCurrent();
             Print("HEDGE BUY FAILED: lot=", hedgeLot, " ask=", ask, " err=", trade.ResultRetcode(), " msg=", trade.ResultRetcodeDescription());
-         }
-      }
-      else
-      {
-         static datetime hedgeSkipSellLog = 0;
-         if(TimeCurrent() - hedgeSkipSellLog > 30)
-         {
-            hedgeSkipSellLog = TimeCurrent();
-            Print("HEDGE SKIP SELL: distPips=", DoubleToString(distPips, 1), " need=", DoubleToString(HedgeDistancePips, 1), " buyCount=", g_buyCount, " max=", MaxHedgeCount);
          }
       }
    }
@@ -2037,17 +2110,22 @@ void ManageTrailingStop()
          // Trailing stop
          if(Use_Trailing_Stop && profitPips >= TrailingStartPips)
          {
-            // Calculate trailing distance
-            double trailDistPoints = TrailingDistancePips * _Point;
-            if(TrailingMode == 1)
-            {
-               // ATR based trailing
-               double atrVal[];
-               if(CopyBuffer(g_trailAtrHandle, 0, 0, 1, atrVal) == 1)
-                  trailDistPoints = atrVal[0] * Trail_ATR_Multiplier;
-            }
+             // Calculate trailing distance
+             double trailDistPoints = TrailingDistancePips * _Point;
+             if(TrailingMode == 1)
+             {
+                // ATR based trailing
+                double atrVal[];
+                if(CopyBuffer(g_trailAtrHandle, 0, 0, 1, atrVal) == 1)
+                   trailDistPoints = atrVal[0] * Trail_ATR_Multiplier;
+             }
 
-            double newSL = NormalizeDouble(bid - trailDistPoints, _Digits);
+             // Safety: minimum trail distance = 20 points
+             double minTrailDist = 20 * _Point;
+             if(trailDistPoints < minTrailDist)
+                trailDistPoints = minTrailDist;
+
+             double newSL = NormalizeDouble(bid - trailDistPoints, _Digits);
 
             // Only snap to step grid if step is meaningful relative to price
             double stepSize = TrailingStepPips * _Point;
@@ -2098,17 +2176,22 @@ void ManageTrailingStop()
          // Trailing stop
          if(Use_Trailing_Stop && profitPips >= TrailingStartPips)
          {
-            // Calculate trailing distance
-            double trailDistPoints = TrailingDistancePips * _Point;
-            if(TrailingMode == 1)
-            {
-               // ATR based trailing
-               double atrVal[];
-               if(CopyBuffer(g_trailAtrHandle, 0, 0, 1, atrVal) == 1)
-                  trailDistPoints = atrVal[0] * Trail_ATR_Multiplier;
-            }
+             // Calculate trailing distance
+             double trailDistPoints = TrailingDistancePips * _Point;
+             if(TrailingMode == 1)
+             {
+                // ATR based trailing
+                double atrVal[];
+                if(CopyBuffer(g_trailAtrHandle, 0, 0, 1, atrVal) == 1)
+                   trailDistPoints = atrVal[0] * Trail_ATR_Multiplier;
+             }
 
-            double newSL = NormalizeDouble(ask + trailDistPoints, _Digits);
+             // Safety: minimum trail distance = 20 points
+             double minTrailDist = 20 * _Point;
+             if(trailDistPoints < minTrailDist)
+                trailDistPoints = minTrailDist;
+
+             double newSL = NormalizeDouble(ask + trailDistPoints, _Digits);
 
             // Only snap to step grid if step is meaningful relative to price
             double stepSize = TrailingStepPips * _Point;
@@ -2577,12 +2660,18 @@ void ManagePctTrail()
 input group "=== CHART DRAWING SETTINGS ==="
 input bool            DrawTP_SL            = true;     // Draw TP/SL Lines
 input bool            DrawTrailLine        = true;     // Draw Trailing Stop Line
+input bool            DrawSmartTrailLine  = true;     // Draw Smart Trail Line
+input bool            DrawPctTrailLine    = true;     // Draw Price % Trail Line
+input bool            DrawHedgeLevel      = true;     // Draw Hedge Entry Level
+input color           HedgeLevelColor     = clrOrange; // Hedge Level Color
 input bool            DrawEntryLine        = true;     // Draw Entry/Avg Price Line
 input bool            DrawProfitBox        = true;     // Draw Profit Info Box
 input bool            CleanChart           = true;     // Remove grid, set candle colors
 input color           TP_Color             = C'0,200,100';   // Take Profit Color
 input color           SL_Color             = C'220,50,50';    // Stop Loss Color
 input color           Trail_Color          = C'255,200,0';    // Trailing Stop Color
+input color           SmartTrail_Color     = C'0,200,255';    // Smart Trail Color
+input color           PctTrail_Color       = C'200,100,255';  // Price % Trail Color
 input color           Entry_Color          = C'0,150,255';    // Entry Price Color
 input color           Avg_Color            = C'200,200,200';  // Average Price Color
 input int             LineWidth            = 2;        // Line Width
@@ -2813,16 +2902,15 @@ void DrawTradeLines()
       ObjectSetInteger(0, slLabel, OBJPROP_HIDDEN, true);
    }
 
-    // === TRAILING STOP LINE ===
+    // === TRAILING STOP LINE — always show theoretical level ===
     if(DrawTrailLine && Use_Trailing_Stop && g_totalCount > 0)
     {
        double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
        double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-       // Draw trail for BUY positions - use actual SL from position
+       // BUY trail
        if(g_hasBuy)
        {
-          double bestBuySL = 0;
           double bestBuyOpen = 0;
           int buyCnt = 0;
           for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -2833,66 +2921,52 @@ void DrawTradeLines()
              if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
              if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
              {
-                double sl = PositionGetDouble(POSITION_SL);
-                double op = PositionGetDouble(POSITION_PRICE_OPEN);
-                if(sl > bestBuySL) bestBuySL = sl;
-                bestBuyOpen += op;
+                bestBuyOpen += PositionGetDouble(POSITION_PRICE_OPEN);
                 buyCnt++;
              }
           }
           if(buyCnt > 0) bestBuyOpen /= buyCnt;
 
-          // If position has an SL set, use it; otherwise calculate theoretical trail
-          double trailSL = 0;
-          if(bestBuySL > 0)
+          double trailDistPoints = TrailingDistancePips * _Point;
+          if(TrailingMode == 1)
           {
-             trailSL = bestBuySL;  // Use actual SL from position
+             double atrVal[];
+             if(CopyBuffer(g_trailAtrHandle, 0, 0, 1, atrVal) == 1)
+                trailDistPoints = atrVal[0] * Trail_ATR_Multiplier;
           }
-          else
-          {
-             // Calculate theoretical trail level
-             double trailDistPoints = TrailingDistancePips * _Point;
-             if(TrailingMode == 1)
-             {
-                double atrVal[];
-                if(CopyBuffer(g_trailAtrHandle, 0, 0, 1, atrVal) == 1)
-                   trailDistPoints = atrVal[0] * Trail_ATR_Multiplier;
-             }
-             trailSL = NormalizeDouble(bid - trailDistPoints, _Digits);
-             if(trailSL < bestBuyOpen) trailSL = NormalizeDouble(bestBuyOpen + _Point, _Digits);
-          }
+          double minTrailDist = 20 * _Point;
+          if(trailDistPoints < minTrailDist) trailDistPoints = minTrailDist;
 
-          if(trailSL > 0 && bestBuyOpen > 0)
-          {
-             double profitPts = (bid - bestBuyOpen) / _Point;
+          double trailSL = NormalizeDouble(bid - trailDistPoints, _Digits);
+          if(trailSL < bestBuyOpen) trailSL = NormalizeDouble(bestBuyOpen + trailDistPoints * 0.1, _Digits);
 
-             string trailName = "TRADE_TRAIL_BUY";
-             ObjectCreate(0, trailName, OBJ_HLINE, 0, 0, trailSL);
-             ObjectSetInteger(0, trailName, OBJPROP_COLOR, clrDodgerBlue);
-             ObjectSetInteger(0, trailName, OBJPROP_STYLE, STYLE_DASHDOT);
-             ObjectSetInteger(0, trailName, OBJPROP_WIDTH, LineWidth + 1);
-             ObjectSetInteger(0, trailName, OBJPROP_BACK, false);
-             ObjectSetInteger(0, trailName, OBJPROP_SELECTABLE, false);
-             ObjectSetInteger(0, trailName, OBJPROP_HIDDEN, true);
+          double profitPts = (bid - bestBuyOpen) / _Point;
+          string status = (profitPts >= TrailingStartPips) ? "" : " (WAIT)";
+          string trailName = "TRADE_TRAIL_BUY";
+          ObjectCreate(0, trailName, OBJ_HLINE, 0, 0, trailSL);
+          ObjectSetInteger(0, trailName, OBJPROP_COLOR, clrDodgerBlue);
+          ObjectSetInteger(0, trailName, OBJPROP_STYLE, STYLE_DASHDOT);
+          ObjectSetInteger(0, trailName, OBJPROP_WIDTH, LineWidth + 1);
+          ObjectSetInteger(0, trailName, OBJPROP_BACK, false);
+          ObjectSetInteger(0, trailName, OBJPROP_SELECTABLE, false);
+          ObjectSetInteger(0, trailName, OBJPROP_HIDDEN, true);
 
-             string trailLabel = "TRADE_TRAIL_BUY_LBL";
-             string trailText = "BUY TRAIL: " + DoubleToString(trailSL, _Digits) +
-                               " (" + DoubleToString(profitPts, 0) + " pts)";
-             ObjectCreate(0, trailLabel, OBJ_TEXT, 0, barTime, trailSL);
-             ObjectSetString(0, trailLabel, OBJPROP_TEXT, trailText);
-             ObjectSetInteger(0, trailLabel, OBJPROP_COLOR, clrDodgerBlue);
-             ObjectSetInteger(0, trailLabel, OBJPROP_FONTSIZE, LabelFontSize);
-             ObjectSetInteger(0, trailLabel, OBJPROP_ANCHOR, ANCHOR_LEFT);
-             ObjectSetString(0, trailLabel, OBJPROP_FONT, "Arial Bold");
-             ObjectSetInteger(0, trailLabel, OBJPROP_SELECTABLE, false);
-             ObjectSetInteger(0, trailLabel, OBJPROP_HIDDEN, true);
-          }
+          string trailLabel = "TRADE_TRAIL_BUY_LBL";
+          string trailText = "BUY TRAIL: " + DoubleToString(trailSL, _Digits) +
+                            " (" + DoubleToString(profitPts, 0) + " pts)" + status;
+          ObjectCreate(0, trailLabel, OBJ_TEXT, 0, barTime, trailSL);
+          ObjectSetString(0, trailLabel, OBJPROP_TEXT, trailText);
+          ObjectSetInteger(0, trailLabel, OBJPROP_COLOR, clrDodgerBlue);
+          ObjectSetInteger(0, trailLabel, OBJPROP_FONTSIZE, LabelFontSize);
+          ObjectSetInteger(0, trailLabel, OBJPROP_ANCHOR, ANCHOR_LEFT);
+          ObjectSetString(0, trailLabel, OBJPROP_FONT, "Arial Bold");
+          ObjectSetInteger(0, trailLabel, OBJPROP_SELECTABLE, false);
+          ObjectSetInteger(0, trailLabel, OBJPROP_HIDDEN, true);
        }
 
-       // Draw trail for SELL positions - use actual SL from position
+       // SELL trail
        if(g_hasSell)
        {
-          double bestSellSL = 999999;
           double bestSellOpen = 0;
           int sellCnt = 0;
           for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -2903,64 +2977,403 @@ void DrawTradeLines()
              if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
              if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
              {
-                double sl = PositionGetDouble(POSITION_SL);
-                double op = PositionGetDouble(POSITION_PRICE_OPEN);
-                if(sl > 0 && sl < bestSellSL) bestSellSL = sl;
-                bestSellOpen += op;
+                bestSellOpen += PositionGetDouble(POSITION_PRICE_OPEN);
                 sellCnt++;
              }
           }
           if(sellCnt > 0) bestSellOpen /= sellCnt;
 
-          // If position has an SL set, use it; otherwise calculate theoretical trail
-          double trailSL = 0;
-          if(bestSellSL < 999999 && bestSellSL > 0)
+          double trailDistPoints = TrailingDistancePips * _Point;
+          if(TrailingMode == 1)
           {
-             trailSL = bestSellSL;  // Use actual SL from position
+             double atrVal[];
+             if(CopyBuffer(g_trailAtrHandle, 0, 0, 1, atrVal) == 1)
+                trailDistPoints = atrVal[0] * Trail_ATR_Multiplier;
           }
-          else
+          double minTrailDist = 20 * _Point;
+          if(trailDistPoints < minTrailDist) trailDistPoints = minTrailDist;
+
+          double trailSL = NormalizeDouble(ask + trailDistPoints, _Digits);
+          if(trailSL > bestSellOpen) trailSL = NormalizeDouble(bestSellOpen - trailDistPoints * 0.1, _Digits);
+
+          double profitPts = (bestSellOpen - ask) / _Point;
+          string status = (profitPts >= TrailingStartPips) ? "" : " (WAIT)";
+          string trailName = "TRADE_TRAIL_SELL";
+          ObjectCreate(0, trailName, OBJ_HLINE, 0, 0, trailSL);
+          ObjectSetInteger(0, trailName, OBJPROP_COLOR, clrCoral);
+          ObjectSetInteger(0, trailName, OBJPROP_STYLE, STYLE_DASHDOT);
+          ObjectSetInteger(0, trailName, OBJPROP_WIDTH, LineWidth + 1);
+          ObjectSetInteger(0, trailName, OBJPROP_BACK, false);
+          ObjectSetInteger(0, trailName, OBJPROP_SELECTABLE, false);
+          ObjectSetInteger(0, trailName, OBJPROP_HIDDEN, true);
+
+          string trailLabel = "TRADE_TRAIL_SELL_LBL";
+          string trailText = "SELL TRAIL: " + DoubleToString(trailSL, _Digits) +
+                            " (" + DoubleToString(profitPts, 0) + " pts)" + status;
+          ObjectCreate(0, trailLabel, OBJ_TEXT, 0, barTime, trailSL);
+          ObjectSetString(0, trailLabel, OBJPROP_TEXT, trailText);
+          ObjectSetInteger(0, trailLabel, OBJPROP_COLOR, clrCoral);
+          ObjectSetInteger(0, trailLabel, OBJPROP_FONTSIZE, LabelFontSize);
+          ObjectSetInteger(0, trailLabel, OBJPROP_ANCHOR, ANCHOR_LEFT);
+          ObjectSetString(0, trailLabel, OBJPROP_FONT, "Arial Bold");
+           ObjectSetInteger(0, trailLabel, OBJPROP_SELECTABLE, false);
+           ObjectSetInteger(0, trailLabel, OBJPROP_HIDDEN, true);
+        }
+     }
+
+     // === SMART TRAIL LINE — always show theoretical level ===
+    if(DrawSmartTrailLine && Use_SmartTrail && g_totalCount > 0)
+    {
+       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+       double atr = GetSmartATR();
+       if(atr > 0)
+       {
+          double adx = GetSmartADX();
+          double atrMult = SmartTrail_ATR_Normal;
+          if(adx >= SmartTrail_ADX_Strong) atrMult = SmartTrail_ATR_Strong;
+          else if(adx < SmartTrail_ADX_Weak) atrMult = SmartTrail_ATR_Weak;
+
+          double trailDist = atr * atrMult;
+          double R = atr * SmartTrail_ATR_Normal;
+
+          // BUY smart trail — show at ATR distance from price
+          if(g_hasBuy)
           {
-             // Calculate theoretical trail level
-             double trailDistPoints = TrailingDistancePips * _Point;
-             if(TrailingMode == 1)
+             double bestBuyOpen = 0;
+             int buyCnt = 0;
+             for(int i = PositionsTotal() - 1; i >= 0; i--)
              {
-                double atrVal[];
-                if(CopyBuffer(g_trailAtrHandle, 0, 0, 1, atrVal) == 1)
-                   trailDistPoints = atrVal[0] * Trail_ATR_Multiplier;
+                ulong t = PositionGetTicket(i);
+                if(t == 0) continue;
+                if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+                if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
+                if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+                {
+                   bestBuyOpen += PositionGetDouble(POSITION_PRICE_OPEN);
+                   buyCnt++;
+                }
              }
-             trailSL = NormalizeDouble(ask + trailDistPoints, _Digits);
-             if(trailSL > bestSellOpen) trailSL = NormalizeDouble(bestSellOpen - _Point, _Digits);
+             if(buyCnt > 0) bestBuyOpen /= buyCnt;
+
+             double profitPts = (bid - bestBuyOpen) / _Point;
+             double smartSL = NormalizeDouble(bid - trailDist, _Digits);
+             if(smartSL < bestBuyOpen) smartSL = NormalizeDouble(bestBuyOpen + trailDist * 0.1, _Digits);
+
+             string status = "";
+             if(profitPts < SmartTrail_BE_R * R / _Point) status = " (WAIT)";
+
+             string smartName = "TRADE_SMART_TRAIL_BUY";
+             ObjectCreate(0, smartName, OBJ_HLINE, 0, 0, smartSL);
+             ObjectSetInteger(0, smartName, OBJPROP_COLOR, SmartTrail_Color);
+             ObjectSetInteger(0, smartName, OBJPROP_STYLE, STYLE_DASHDOTDOT);
+             ObjectSetInteger(0, smartName, OBJPROP_WIDTH, LineWidth + 1);
+             ObjectSetInteger(0, smartName, OBJPROP_BACK, false);
+             ObjectSetInteger(0, smartName, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, smartName, OBJPROP_HIDDEN, true);
+
+             string smartLabel = "TRADE_SMART_TRAIL_BUY_LBL";
+             string smartText = "SMART TRAIL: " + DoubleToString(smartSL, _Digits) +
+                               " (" + DoubleToString(profitPts, 0) + " pts)" + status;
+             ObjectCreate(0, smartLabel, OBJ_TEXT, 0, barTime, smartSL);
+             ObjectSetString(0, smartLabel, OBJPROP_TEXT, smartText);
+             ObjectSetInteger(0, smartLabel, OBJPROP_COLOR, SmartTrail_Color);
+             ObjectSetInteger(0, smartLabel, OBJPROP_FONTSIZE, LabelFontSize);
+             ObjectSetInteger(0, smartLabel, OBJPROP_ANCHOR, ANCHOR_LEFT);
+             ObjectSetString(0, smartLabel, OBJPROP_FONT, "Arial Bold");
+             ObjectSetInteger(0, smartLabel, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, smartLabel, OBJPROP_HIDDEN, true);
           }
 
-          if(trailSL > 0 && bestSellOpen > 0)
+          // SELL smart trail — show at ATR distance from price
+          if(g_hasSell)
           {
+             double bestSellOpen = 0;
+             int sellCnt = 0;
+             for(int i = PositionsTotal() - 1; i >= 0; i--)
+             {
+                ulong t = PositionGetTicket(i);
+                if(t == 0) continue;
+                if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+                if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
+                if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+                {
+                   bestSellOpen += PositionGetDouble(POSITION_PRICE_OPEN);
+                   sellCnt++;
+                }
+             }
+             if(sellCnt > 0) bestSellOpen /= sellCnt;
+
              double profitPts = (bestSellOpen - ask) / _Point;
+             double smartSL = NormalizeDouble(ask + trailDist, _Digits);
+             if(smartSL > bestSellOpen) smartSL = NormalizeDouble(bestSellOpen - trailDist * 0.1, _Digits);
 
-             string trailName = "TRADE_TRAIL_SELL";
-             ObjectCreate(0, trailName, OBJ_HLINE, 0, 0, trailSL);
-             ObjectSetInteger(0, trailName, OBJPROP_COLOR, clrCoral);
-             ObjectSetInteger(0, trailName, OBJPROP_STYLE, STYLE_DASHDOT);
-             ObjectSetInteger(0, trailName, OBJPROP_WIDTH, LineWidth + 1);
-             ObjectSetInteger(0, trailName, OBJPROP_BACK, false);
-             ObjectSetInteger(0, trailName, OBJPROP_SELECTABLE, false);
-             ObjectSetInteger(0, trailName, OBJPROP_HIDDEN, true);
+             string status = "";
+             if(profitPts < SmartTrail_BE_R * R / _Point) status = " (WAIT)";
 
-             string trailLabel = "TRADE_TRAIL_SELL_LBL";
-             string trailText = "SELL TRAIL: " + DoubleToString(trailSL, _Digits) +
-                               " (" + DoubleToString(profitPts, 0) + " pts)";
-             ObjectCreate(0, trailLabel, OBJ_TEXT, 0, barTime, trailSL);
-             ObjectSetString(0, trailLabel, OBJPROP_TEXT, trailText);
-             ObjectSetInteger(0, trailLabel, OBJPROP_COLOR, clrCoral);
-             ObjectSetInteger(0, trailLabel, OBJPROP_FONTSIZE, LabelFontSize);
-             ObjectSetInteger(0, trailLabel, OBJPROP_ANCHOR, ANCHOR_LEFT);
-             ObjectSetString(0, trailLabel, OBJPROP_FONT, "Arial Bold");
-             ObjectSetInteger(0, trailLabel, OBJPROP_SELECTABLE, false);
-             ObjectSetInteger(0, trailLabel, OBJPROP_HIDDEN, true);
+             string smartName = "TRADE_SMART_TRAIL_SELL";
+             ObjectCreate(0, smartName, OBJ_HLINE, 0, 0, smartSL);
+             ObjectSetInteger(0, smartName, OBJPROP_COLOR, SmartTrail_Color);
+             ObjectSetInteger(0, smartName, OBJPROP_STYLE, STYLE_DASHDOTDOT);
+             ObjectSetInteger(0, smartName, OBJPROP_WIDTH, LineWidth + 1);
+             ObjectSetInteger(0, smartName, OBJPROP_BACK, false);
+             ObjectSetInteger(0, smartName, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, smartName, OBJPROP_HIDDEN, true);
+
+             string smartLabel = "TRADE_SMART_TRAIL_SELL_LBL";
+             string smartText = "SMART TRAIL: " + DoubleToString(smartSL, _Digits) +
+                               " (" + DoubleToString(profitPts, 0) + " pts)" + status;
+             ObjectCreate(0, smartLabel, OBJ_TEXT, 0, barTime, smartSL);
+             ObjectSetString(0, smartLabel, OBJPROP_TEXT, smartText);
+             ObjectSetInteger(0, smartLabel, OBJPROP_COLOR, SmartTrail_Color);
+             ObjectSetInteger(0, smartLabel, OBJPROP_FONTSIZE, LabelFontSize);
+             ObjectSetInteger(0, smartLabel, OBJPROP_ANCHOR, ANCHOR_LEFT);
+             ObjectSetString(0, smartLabel, OBJPROP_FONT, "Arial Bold");
+             ObjectSetInteger(0, smartLabel, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, smartLabel, OBJPROP_HIDDEN, true);
           }
        }
     }
 
-   // === PROFIT INFO BOX ===
+    // === PRICE % TRAIL LINE — always show theoretical level ===
+    if(DrawPctTrailLine && Use_PctTrail && g_totalCount > 0)
+    {
+       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+       double atr = GetATRValue();
+       if(atr > 0)
+       {
+          double adx = GetSmartADX();
+          double trailPct = PctTrail_Trail_Normal;
+          if(adx >= PctTrail_ADX_Strong) trailPct = PctTrail_Trail_Strong;
+          else if(adx < PctTrail_ADX_Choppy) trailPct = PctTrail_Trail_Choppy;
+
+          // BUY pct trail
+          if(g_hasBuy)
+          {
+             datetime buyEntryTime = 0;
+             double bestBuyOpen = 0;
+             int buyCnt = 0;
+             for(int i = PositionsTotal() - 1; i >= 0; i--)
+             {
+                ulong t = PositionGetTicket(i);
+                if(t == 0) continue;
+                if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+                if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
+                if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+                {
+                   bestBuyOpen += PositionGetDouble(POSITION_PRICE_OPEN);
+                   if(buyEntryTime == 0) buyEntryTime = (datetime)PositionGetInteger(POSITION_TIME);
+                   buyCnt++;
+                }
+             }
+             if(buyCnt > 0) bestBuyOpen /= buyCnt;
+
+             double highest = GetHighestSinceEntry(buyEntryTime, bid);
+             double profitR = (bid - bestBuyOpen) / atr;
+
+             double slTrail = NormalizeDouble(highest * (1.0 - trailPct / 100.0), _Digits);
+             double minDist = MathMax(atr * 0.10, _Point * 20);
+             double pctSL = slTrail;
+             if(bid - pctSL < minDist)
+                pctSL = NormalizeDouble(bid - minDist, _Digits);
+
+             string status = (profitR >= PctTrail_ActivateR) ? "" : " (WAIT)";
+
+             string pctName = "TRADE_PCT_TRAIL_BUY";
+             ObjectCreate(0, pctName, OBJ_HLINE, 0, 0, pctSL);
+             ObjectSetInteger(0, pctName, OBJPROP_COLOR, PctTrail_Color);
+             ObjectSetInteger(0, pctName, OBJPROP_STYLE, STYLE_DOT);
+             ObjectSetInteger(0, pctName, OBJPROP_WIDTH, LineWidth + 1);
+             ObjectSetInteger(0, pctName, OBJPROP_BACK, false);
+             ObjectSetInteger(0, pctName, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, pctName, OBJPROP_HIDDEN, true);
+
+             string pctLabel = "TRADE_PCT_TRAIL_BUY_LBL";
+             string pctText = "PCT TRAIL: " + DoubleToString(pctSL, _Digits) +
+                             " (" + DoubleToString(trailPct, 1) + "%)" + status;
+             ObjectCreate(0, pctLabel, OBJ_TEXT, 0, barTime, pctSL);
+             ObjectSetString(0, pctLabel, OBJPROP_TEXT, pctText);
+             ObjectSetInteger(0, pctLabel, OBJPROP_COLOR, PctTrail_Color);
+             ObjectSetInteger(0, pctLabel, OBJPROP_FONTSIZE, LabelFontSize);
+             ObjectSetInteger(0, pctLabel, OBJPROP_ANCHOR, ANCHOR_LEFT);
+             ObjectSetString(0, pctLabel, OBJPROP_FONT, "Arial Bold");
+             ObjectSetInteger(0, pctLabel, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, pctLabel, OBJPROP_HIDDEN, true);
+          }
+
+          // SELL pct trail
+          if(g_hasSell)
+          {
+             datetime sellEntryTime = 0;
+             double bestSellOpen = 0;
+             int sellCnt = 0;
+             for(int i = PositionsTotal() - 1; i >= 0; i--)
+             {
+                ulong t = PositionGetTicket(i);
+                if(t == 0) continue;
+                if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+                if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
+                if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+                {
+                   bestSellOpen += PositionGetDouble(POSITION_PRICE_OPEN);
+                   if(sellEntryTime == 0) sellEntryTime = (datetime)PositionGetInteger(POSITION_TIME);
+                   sellCnt++;
+                }
+             }
+             if(sellCnt > 0) bestSellOpen /= sellCnt;
+
+             double lowest = GetLowestSinceEntry(sellEntryTime, ask);
+             double profitR = (bestSellOpen - ask) / atr;
+
+             double slTrail = NormalizeDouble(lowest * (1.0 + trailPct / 100.0), _Digits);
+             double minDist = MathMax(atr * 0.10, _Point * 20);
+             double pctSL = slTrail;
+             if(pctSL - ask < minDist)
+                pctSL = NormalizeDouble(ask + minDist, _Digits);
+
+             string status = (profitR >= PctTrail_ActivateR) ? "" : " (WAIT)";
+
+             string pctName = "TRADE_PCT_TRAIL_SELL";
+             ObjectCreate(0, pctName, OBJ_HLINE, 0, 0, pctSL);
+             ObjectSetInteger(0, pctName, OBJPROP_COLOR, PctTrail_Color);
+             ObjectSetInteger(0, pctName, OBJPROP_STYLE, STYLE_DOT);
+             ObjectSetInteger(0, pctName, OBJPROP_WIDTH, LineWidth + 1);
+             ObjectSetInteger(0, pctName, OBJPROP_BACK, false);
+             ObjectSetInteger(0, pctName, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, pctName, OBJPROP_HIDDEN, true);
+
+             string pctLabel = "TRADE_PCT_TRAIL_SELL_LBL";
+             string pctText = "PCT TRAIL: " + DoubleToString(pctSL, _Digits) +
+                             " (" + DoubleToString(trailPct, 1) + "%)" + status;
+             ObjectCreate(0, pctLabel, OBJ_TEXT, 0, barTime, pctSL);
+             ObjectSetString(0, pctLabel, OBJPROP_TEXT, pctText);
+             ObjectSetInteger(0, pctLabel, OBJPROP_COLOR, PctTrail_Color);
+             ObjectSetInteger(0, pctLabel, OBJPROP_FONTSIZE, LabelFontSize);
+             ObjectSetInteger(0, pctLabel, OBJPROP_ANCHOR, ANCHOR_LEFT);
+             ObjectSetString(0, pctLabel, OBJPROP_FONT, "Arial Bold");
+             ObjectSetInteger(0, pctLabel, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, pctLabel, OBJPROP_HIDDEN, true);
+          }
+       }
+    }
+
+    // === HEDGE ENTRY LEVEL LINE ===
+    if(DrawHedgeLevel && Use_Hedging && g_totalCount > 0)
+    {
+       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+       datetime now = TimeCurrent();
+       datetime barTime = iTime(_Symbol, g_currentTimeframe, 0);
+
+       // Show where next hedge will open
+       if(g_hasBuy && !g_hasSell)
+       {
+          // BUY only: need SELL hedge
+          double hedgeLevel = 0;
+          string modeStr = "";
+
+          if(HedgeMode == 0)
+          {
+             // Distance: hedge when price drops HedgeDistancePips below avg buy
+             hedgeLevel = g_buyAvgPrice - (HedgeDistancePips * _Point * 10);
+             modeStr = "DIST";
+          }
+          else if(HedgeMode == 1)
+          {
+             // Immediate: hedge as soon as price < avg buy
+             hedgeLevel = g_buyAvgPrice;
+             modeStr = "IMM";
+          }
+          else if(HedgeMode == 3)
+          {
+             // Candle Close: need close[2] < close[1]
+             double close2 = iClose(_Symbol, g_currentTimeframe, 2);
+             double close1 = iClose(_Symbol, g_currentTimeframe, 1);
+             hedgeLevel = close1;  // Need price below this
+             modeStr = "CANDLE(" + DoubleToString(close1, _Digits) + ")";
+          }
+
+          if(hedgeLevel > 0)
+          {
+             string hedgeName = "TRADE_HEDGE_LEVEL";
+             ObjectCreate(0, hedgeName, OBJ_HLINE, 0, 0, hedgeLevel);
+             ObjectSetInteger(0, hedgeName, OBJPROP_COLOR, HedgeLevelColor);
+             ObjectSetInteger(0, hedgeName, OBJPROP_STYLE, STYLE_DASH);
+             ObjectSetInteger(0, hedgeName, OBJPROP_WIDTH, 2);
+             ObjectSetInteger(0, hedgeName, OBJPROP_BACK, false);
+             ObjectSetInteger(0, hedgeName, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, hedgeName, OBJPROP_HIDDEN, true);
+
+             string hedgeLabel = "TRADE_HEDGE_LABEL";
+             string status = (bid < hedgeLevel) ? " READY" : " WAITING";
+             string hedgeText = "HEDGE SELL " + modeStr + ": " + DoubleToString(hedgeLevel, _Digits) + status;
+             ObjectCreate(0, hedgeLabel, OBJ_TEXT, 0, barTime, hedgeLevel);
+             ObjectSetString(0, hedgeLabel, OBJPROP_TEXT, hedgeText);
+             ObjectSetInteger(0, hedgeLabel, OBJPROP_COLOR, HedgeLevelColor);
+             ObjectSetInteger(0, hedgeLabel, OBJPROP_FONTSIZE, LabelFontSize);
+             ObjectSetInteger(0, hedgeLabel, OBJPROP_ANCHOR, ANCHOR_LEFT);
+             ObjectSetString(0, hedgeLabel, OBJPROP_FONT, "Arial Bold");
+             ObjectSetInteger(0, hedgeLabel, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, hedgeLabel, OBJPROP_HIDDEN, true);
+          }
+       }
+       else if(g_hasSell && !g_hasBuy)
+       {
+          // SELL only: need BUY hedge
+          double hedgeLevel = 0;
+          string modeStr = "";
+
+          if(HedgeMode == 0)
+          {
+             // Distance: hedge when price rises HedgeDistancePips above avg sell
+             hedgeLevel = g_sellAvgPrice + (HedgeDistancePips * _Point * 10);
+             modeStr = "DIST";
+          }
+          else if(HedgeMode == 1)
+          {
+             // Immediate: hedge as soon as price > avg sell
+             hedgeLevel = g_sellAvgPrice;
+             modeStr = "IMM";
+          }
+          else if(HedgeMode == 3)
+          {
+             // Candle Close: need close[2] > close[1]
+             double close2 = iClose(_Symbol, g_currentTimeframe, 2);
+             double close1 = iClose(_Symbol, g_currentTimeframe, 1);
+             hedgeLevel = close1;  // Need price above this
+             modeStr = "CANDLE(" + DoubleToString(close1, _Digits) + ")";
+          }
+
+          if(hedgeLevel > 0)
+          {
+             string hedgeName = "TRADE_HEDGE_LEVEL";
+             ObjectCreate(0, hedgeName, OBJ_HLINE, 0, 0, hedgeLevel);
+             ObjectSetInteger(0, hedgeName, OBJPROP_COLOR, HedgeLevelColor);
+             ObjectSetInteger(0, hedgeName, OBJPROP_STYLE, STYLE_DASH);
+             ObjectSetInteger(0, hedgeName, OBJPROP_WIDTH, 2);
+             ObjectSetInteger(0, hedgeName, OBJPROP_BACK, false);
+             ObjectSetInteger(0, hedgeName, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, hedgeName, OBJPROP_HIDDEN, true);
+
+             string hedgeLabel = "TRADE_HEDGE_LABEL";
+             string status = (ask > hedgeLevel) ? " READY" : " WAITING";
+             string hedgeText = "HEDGE BUY " + modeStr + ": " + DoubleToString(hedgeLevel, _Digits) + status;
+             ObjectCreate(0, hedgeLabel, OBJ_TEXT, 0, barTime, hedgeLevel);
+             ObjectSetString(0, hedgeLabel, OBJPROP_TEXT, hedgeText);
+             ObjectSetInteger(0, hedgeLabel, OBJPROP_COLOR, HedgeLevelColor);
+             ObjectSetInteger(0, hedgeLabel, OBJPROP_FONTSIZE, LabelFontSize);
+             ObjectSetInteger(0, hedgeLabel, OBJPROP_ANCHOR, ANCHOR_LEFT);
+             ObjectSetString(0, hedgeLabel, OBJPROP_FONT, "Arial Bold");
+             ObjectSetInteger(0, hedgeLabel, OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(0, hedgeLabel, OBJPROP_HIDDEN, true);
+          }
+       }
+    }
+
+    // === PROFIT INFO BOX ===
    if(DrawProfitBox)
    {
       string boxName = "TRADE_INFO_BOX";
@@ -3025,7 +3438,7 @@ void DrawTradeLines()
       else
          boxText += "SL: OFF\n";
 
-      if(Use_Trailing_Stop && !(g_hasBuy && g_hasSell))
+      if(Use_Trailing_Stop)
       {
          double profitPips = 0;
          if(g_hasBuy) profitPips = (bid - g_avgPrice) / _Point;
