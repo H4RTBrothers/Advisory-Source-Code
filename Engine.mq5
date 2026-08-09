@@ -28,6 +28,15 @@ enum ENUM_ATR_MULT_CLOSE
    ATR_CLOSE_5_0 = 50  // 5.0x
 };
 
+enum ENUM_HEDGE_STATE
+{
+   HSTATE_NORMAL = 0,
+   HSTATE_WARNING,
+   HSTATE_PARTIAL_HEDGE,
+   HSTATE_FULL_HEDGE,
+   HSTATE_RECOVERY
+};
+
 input group "=== General Settings ==="
 input string          Minimal_Deposit      = "$200";
 input string          Time_Frame           = "Time Frame M1";
@@ -46,7 +55,7 @@ input group "=== Trade Settings ==="
 input double          TakeProfit          = 80000;
 input double          Step                = 21000.0;
 input double          Averaging           = 1.21;
-input int             MaxTrades           = 100;
+input int             MaxTrades           = 31;
 input int             MinTradeDelaySec    = 60;       // Min seconds between trades
 
 input group "=== TP Multiplier ==="
@@ -128,6 +137,43 @@ input int             MaxHedgeCount       = 100;
 input double          HedgeStepPips       = 30000;
 input bool            Use_Hedge_TP        = true;
 input double          HedgeTakeProfit     = 80000.0;
+input int             HedgeAvgMode        = 1;        // 0=Fixed Step, 1=Candle Close (like entry)
+
+input group "=== Hedge Adaptive Sizing ==="
+input double          HedgeStartDDPct     = 0.50;     // DD% to start hedging
+input double          HedgeMaxDDPct       = 2.00;     // DD% for max hedge
+input double          HedgeInitialRatio   = 0.30;     // Initial hedge ratio (0.30 = 30% of original)
+input double          HedgeStepRatio      = 0.20;     // Step up ratio on ATR spike
+input double          HedgeMaxRatio       = 1.00;     // Max hedge ratio (1.00 = full hedge)
+input double          HedgeATRTrigger     = 1.00;     // ATR multiplier to trigger hedge
+input double          HedgeFullATR        = 1.75;     // ATR multiplier for full hedge
+input int             HedgeATRPeriod      = 14;       // ATR period for hedge trigger
+
+input group "=== Hedge Safety ==="
+input int             MaxHedgeCycles      = 3;        // Max hedge open cycles
+input int             HedgeCooldownBars   = 3;        // Bars between hedge actions
+input int             MinSecondsBetweenMods = 2;      // Min seconds between modify orders
+
+input group "=== Hedge Profit Lock ==="
+input bool            Use_HedgeProfitLock = false;    // Lock hedge profit with SL
+input double          HedgeLockStartR     = 0.50;     // Lock starts at +X R profit
+input double          HedgeLockPct        = 60.0;     // Lock X% of peak hedge profit
+input double          HedgeLockMinProfit  = 0.0;      // Min profit $ to start locking
+
+input group "=== Staged Unlock ==="
+input bool            Use_StagedUnlock    = false;    // Close hedge gradually in stages
+input double          UnlockStepPct       = 25.0;     // Close X% of hedge per stage
+input double          UnlockMinHedgeR     = 0.25;     // Min hedge R profit to unlock
+input double          UnlockMinBasketImprove = 0.10;  // Min basket improvement to unlock
+input double          UnlockADX           = 20.0;     // Min ADX for recovery confirmation
+input int             UnlockCooldownBars  = 3;        // Bars between unlock stages
+
+input group "=== Account Safety ==="
+input double          MaxBasketDDPct      = 3.0;      // Max basket DD% before close all
+input double          MaxDailyLossPct     = 4.0;      // Max daily loss %
+input double          MaxOverallLossPct   = 8.0;      // Max overall loss %
+input double          MinMarginLevelPct   = 300.0;    // Min margin level %
+input bool            CloseOnHardDD       = true;     // Close all on hard DD
 
 input group "=== Trailing Stop ==="
 input bool            Use_Trailing_Stop   = true;
@@ -329,6 +375,16 @@ bool     g_equityTrailActive;
 int      g_smartTrailAtrHandle;
 int      g_smartTrailAdxHandle;
 
+// Hedge lock/unlock variables
+double   g_hedgePeakProfit;
+datetime g_lastUnlockBar;
+datetime g_lastHedgeAction;
+int      g_hedgeCycles;
+ENUM_HEDGE_STATE g_hedgeState;
+double   g_bestBasketProfit;
+double   g_initialBasketEquity;
+int      g_hedgeAtrHandle;
+
 // Manual ATR calculation
 double   g_manualATR;
 double   g_manualATR_prev;
@@ -511,7 +567,16 @@ int OnInit()
        Print("EQUITY ATR INIT OK: handle=", g_equityAtrHandle, " tf=", EnumToString(EquityATR_Timeframe));
 
     // Initialize Smart Trail ATR + ADX
-    g_smartTrailAtrHandle = iATR(_Symbol, PERIOD_CURRENT, SmartTrail_ATR_Period);
+     g_smartTrailAtrHandle = iATR(_Symbol, PERIOD_CURRENT, SmartTrail_ATR_Period);
+
+     // Hedge lock/unlock
+     g_hedgePeakProfit = 0;
+     g_lastUnlockBar = 0;
+     g_lastHedgeAction = 0;
+     g_hedgeCycles = 0;
+     g_hedgeState = HSTATE_NORMAL;
+     g_bestBasketProfit = -DBL_MAX;
+     g_initialBasketEquity = AccountInfoDouble(ACCOUNT_EQUITY);
     g_smartTrailAdxHandle = iADX(_Symbol, PERIOD_CURRENT, SmartTrail_ADX_Period);
     if(g_smartTrailAtrHandle == INVALID_HANDLE)
        Print("SMART TRAIL ATR INIT FAILED");
@@ -822,11 +887,23 @@ void OnTick()
     // Calculate lot for next trade
     CalculateNextLot();
 
-    // HEDGE LOGIC
-    if(Use_Hedging)
-    {
-       ManageHedge();
-    }
+     // HEDGE LOGIC
+     if(Use_Hedging)
+     {
+        ManageHedge();
+        ManageHedgeProfitLock();
+        ManageStagedUnlock();
+     }
+
+     // SAFETY CHECKS
+     UpdateHedgeState();
+     HardDDCheck();
+     if(!AccountSafetyOK())
+     {
+        if(g_totalCount > 0)
+           CloseAllPositions();
+        return;
+     }
 
     // Modify TP for all positions - only when market is open, throttle after failure
     // Only on new bar to stop TP jumping every tick
@@ -944,15 +1021,15 @@ void OnTick()
         // === ORIGINAL ALGORITHM: AVERAGING (has positions) ===
         if(g_totalCount < MaxTrades && !g_manualPaused)
         {
-           bool shouldOpen = false;
-           int direction = 0; // 0=none, 1=buy averaging, 2=sell averaging
+            bool shouldOpen = false;
+            int direction = 0; // 0=none, 1=buy averaging, 2=sell averaging
 
-            bool volumeOK = true;
-            if(invisible_mode && iVolume(_Symbol, g_currentTimeframe, 0) >= 5)
-               volumeOK = false;
+             bool volumeOK = true;
+             if(invisible_mode && HedgeAvgMode == 0 && iVolume(_Symbol, g_currentTimeframe, 0) >= 5)
+                volumeOK = false;
 
-            if(volumeOK)
-            {
+             if(volumeOK)
+             {
                // Original: check if price moved Step points from LAST order
                 // BUY-only: if ask dropped Step points from last buy → open BUY again
                 // Skip if hedge should rebalance (need a SELL to balance)
@@ -1000,27 +1077,65 @@ void OnTick()
                // HEDGED (both buy and sell): run both algorithms independently
                else if(g_hasBuy && g_hasSell)
                {
-                  // Check buy side: price dropped from last buy → add buy
-                  double distBuy = (g_lastBuyPrice - ask) / _Point;
-                  if(distBuy >= g_step && g_buyCount < MaxTrades)
+                  if(HedgeAvgMode == 0)
                   {
-                     shouldOpen = true;
-                     direction = 1; // Buy averaging
-                  }
-                  // Check sell side: price rose from last sell → add sell
-                  double distSell = (bid - g_lastSellPrice) / _Point;
-                  if(distSell >= g_step && g_sellCount < MaxTrades)
-                  {
-                     shouldOpen = true;
-                     direction = 2; // Sell averaging
-                  }
-               }
-           }
+                     // Fixed Step mode
+                     // Check buy side: price dropped from last buy → add buy
+                     double distBuy = (g_lastBuyPrice - ask) / _Point;
+                     if(distBuy >= g_step && g_buyCount < MaxTrades)
+                     {
+                        shouldOpen = true;
+                        direction = 1; // Buy averaging
+                     }
+                     // Check sell side: price rose from last sell → add sell
+                     double distSell = (bid - g_lastSellPrice) / _Point;
+                     if(distSell >= g_step && g_sellCount < MaxTrades)
+                     {
+                        shouldOpen = true;
+                        direction = 2; // Sell averaging
+                     }
+                   }
+                   else if(HedgeAvgMode == 1)
+                   {
+                      // Candle Close mode — reversed for averaging
+                      if(iVolume(_Symbol, g_currentTimeframe, 0) <= 1)
+                      {
+                         double close2 = iClose(_Symbol, g_currentTimeframe, 2);
+                         double close1 = iClose(_Symbol, g_currentTimeframe, 1);
 
-            bool timeOK = (TimeCurrent() - g_lastTradeTime >= MinTradeDelaySec);
+                         if(close2 < close1 && g_buyCount < MaxTrades)
+                         {
+                            shouldOpen = true;
+                            direction = 1;
+                         }
+                         if(close2 > close1 && g_sellCount < MaxTrades)
+                         {
+                            shouldOpen = true;
+                            direction = 2;
+                         }
+                      }
+                   }
+                }
+             }
+
+             bool timeOK = (TimeCurrent() - g_lastTradeTime >= MinTradeDelaySec);
+
+             if(shouldOpen)
+             {
+                static datetime lastBlockLog = 0;
+                if(TimeCurrent() - lastBlockLog > 30)
+                {
+                   lastBlockLog = TimeCurrent();
+                   if(!CheckTimeFilter()) Print("BLOCKED: TimeFilter");
+                   if(g_newsActive) Print("BLOCKED: NewsActive");
+                   if(!timeOK) Print("BLOCKED: timeOK delay=", TimeCurrent() - g_lastTradeTime, " need=", MinTradeDelaySec);
+                   if(!CheckVolatilityFilter()) Print("BLOCKED: VolatilityFilter");
+                   if(!CheckRangeFilter()) Print("BLOCKED: RangeFilter");
+                }
+             }
 
              if(shouldOpen && CheckTimeFilter() && !g_newsActive && timeOK
-                && CheckVolatilityFilter() && CheckRangeFilter())
+                && CheckVolatilityFilter() && ((g_hasBuy && g_hasSell) || CheckRangeFilter()))
             {
                // Use per-side averaging count for lot multiplier
                if(direction == 1)
@@ -1958,20 +2073,17 @@ void ManageHedge()
 
       if(HedgeMode == 0)
       {
-         // Mode 0: Distance-based
          double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          double avgBuyDist = (g_buyAvgPrice - ask) / _Point / 10.0;
          shouldHedge = (avgBuyDist >= HedgeDistancePips);
       }
       else if(HedgeMode == 1)
       {
-         // Mode 1: Immediate — hedge as soon as price moves against us at all
          double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          shouldHedge = (ask < g_buyAvgPrice);
       }
       else if(HedgeMode == 2)
       {
-         // Mode 2: ATR Volume — hedge when ATR spike (volatility expansion)
          double atr[];
          if(CopyBuffer(g_atrHandle, 0, 0, 2, atr) == 2)
          {
@@ -1981,8 +2093,6 @@ void ManageHedge()
       }
       else if(HedgeMode == 3)
       {
-         // Mode 3: Candle Close — same logic as original entry
-         // Only on fresh bar, close[2] < close[1] → SELL hedge
          if(iVolume(_Symbol, g_currentTimeframe, 0) <= 1)
          {
             double close2 = iClose(_Symbol, g_currentTimeframe, 2);
@@ -2017,20 +2127,17 @@ void ManageHedge()
 
       if(HedgeMode == 0)
       {
-         // Mode 0: Distance-based
          double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          double avgSellDist = (ask - g_sellAvgPrice) / _Point / 10.0;
          shouldHedge = (avgSellDist >= HedgeDistancePips);
       }
       else if(HedgeMode == 1)
       {
-         // Mode 1: Immediate — hedge as soon as price moves against us at all
          double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          shouldHedge = (ask > g_sellAvgPrice);
       }
       else if(HedgeMode == 2)
       {
-         // Mode 2: ATR Volume — hedge when ATR spike
          double atr[];
          if(CopyBuffer(g_atrHandle, 0, 0, 2, atr) == 2)
          {
@@ -2040,8 +2147,6 @@ void ManageHedge()
       }
       else if(HedgeMode == 3)
       {
-         // Mode 3: Candle Close — same logic as original entry
-         // Only on fresh bar, close[2] > close[1] → BUY hedge
          if(iVolume(_Symbol, g_currentTimeframe, 0) <= 1)
          {
             double close2 = iClose(_Symbol, g_currentTimeframe, 2);
@@ -2066,6 +2171,311 @@ void ManageHedge()
          {
             g_lastServerFailTime = TimeCurrent();
             Print("HEDGE BUY FAILED: lot=", hedgeLot, " ask=", ask, " err=", trade.ResultRetcode(), " msg=", trade.ResultRetcodeDescription());
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Hedge State Machine — tracks DD/ATR state                         |
+//+------------------------------------------------------------------+
+void UpdateHedgeState()
+{
+   double dd = 0;
+   if(g_totalProfit < 0 && AccountInfoDouble(ACCOUNT_BALANCE) > 0)
+      dd = (-g_totalProfit / AccountInfoDouble(ACCOUNT_BALANCE)) * 100.0;
+
+   if(!g_hasBuy || !g_hasSell)
+   {
+      if(dd < HedgeStartDDPct)
+         g_hedgeState = HSTATE_NORMAL;
+      else
+         g_hedgeState = HSTATE_WARNING;
+      return;
+   }
+
+   // Hedged — check ratio using counts
+   if(g_buyCount > 0 && g_sellCount > 0)
+   {
+      double ratio = (double)MathMin(g_buyCount, g_sellCount) / (double)MathMax(g_buyCount, g_sellCount);
+      if(ratio >= 0.99)
+         g_hedgeState = HSTATE_FULL_HEDGE;
+      else
+         g_hedgeState = HSTATE_PARTIAL_HEDGE;
+   }
+   else
+      g_hedgeState = HSTATE_PARTIAL_HEDGE;
+}
+
+string HedgeStateText()
+{
+   switch(g_hedgeState)
+   {
+      case HSTATE_NORMAL:        return "NORMAL";
+      case HSTATE_WARNING:       return "WARNING";
+      case HSTATE_PARTIAL_HEDGE: return "PARTIAL_HEDGE";
+      case HSTATE_FULL_HEDGE:    return "FULL_HEDGE";
+      case HSTATE_RECOVERY:      return "RECOVERY";
+   }
+   return "UNKNOWN";
+}
+
+//+------------------------------------------------------------------+
+//| Account Safety — daily loss, overall loss, margin level            |
+//+------------------------------------------------------------------+
+bool AccountSafetyOK()
+{
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(balance <= 0) return false;
+
+   // Margin level check (0 = disabled)
+   if(MinMarginLevelPct > 0)
+   {
+      double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+      if(marginLevel > 0 && marginLevel < MinMarginLevelPct)
+      {
+         static datetime lastMarginLog = 0;
+         if(TimeCurrent() - lastMarginLog > 300)
+         {
+            lastMarginLog = TimeCurrent();
+            Print("SAFETY: Margin level ", DoubleToString(marginLevel, 0), "% < ", DoubleToString(MinMarginLevelPct, 0), "%");
+         }
+         return false;
+      }
+   }
+
+   // Overall loss check (0 or negative = disabled)
+   if(MaxOverallLossPct > 0 && g_initialBasketEquity > 0)
+   {
+      double dd = (g_initialBasketEquity - equity) / g_initialBasketEquity * 100.0;
+      if(dd >= MaxOverallLossPct)
+      {
+         static datetime lastDdLog = 0;
+         if(TimeCurrent() - lastDdLog > 300)
+         {
+            lastDdLog = TimeCurrent();
+            Print("SAFETY: Overall DD ", DoubleToString(dd, 1), "% >= ", DoubleToString(MaxOverallLossPct, 1), "%");
+         }
+         return false;
+      }
+   }
+
+   return true;
+}
+
+void HardDDCheck()
+{
+   if(!CloseOnHardDD) return;
+
+   double dd = 0;
+   if(g_totalProfit < 0 && AccountInfoDouble(ACCOUNT_BALANCE) > 0)
+      dd = (-g_totalProfit / AccountInfoDouble(ACCOUNT_BALANCE)) * 100.0;
+
+   if(dd >= MaxBasketDDPct)
+   {
+      Print("HARD DD: ", DoubleToString(dd, 1), "% >= ", DoubleToString(MaxBasketDDPct, 1), "%. Closing all.");
+      CloseAllPositions();
+      g_hedgeState = HSTATE_NORMAL;
+      g_hedgeCycles = 0;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Hedge Profit Lock — lock SL on hedge positions when profitable     |
+//+------------------------------------------------------------------+
+void ManageHedgeProfitLock()
+{
+   if(!Use_HedgeProfitLock || !g_hasBuy || !g_hasSell) return;
+
+   double hedgeProfit = 0;
+   double hedgeRisk = 0;
+   int hedgeCount = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(StringFind(comment, "HEDGE") < 0) continue;
+
+      hedgeCount++;
+      double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      hedgeProfit += profit;
+
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      long type = PositionGetInteger(POSITION_TYPE);
+
+      if(sl > 0 && vol > 0)
+      {
+         double risk = 0;
+         if(type == POSITION_TYPE_BUY)
+            OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, vol, open, sl, risk);
+         else
+            OrderCalcProfit(ORDER_TYPE_SELL, _Symbol, vol, open, sl, risk);
+         hedgeRisk += MathAbs(risk);
+      }
+   }
+
+   if(hedgeCount == 0 || hedgeRisk <= 0) return;
+
+   double hedgeR = hedgeProfit / hedgeRisk;
+   if(hedgeR < HedgeLockStartR) return;
+
+   g_hedgePeakProfit = MathMax(g_hedgePeakProfit, hedgeProfit);
+   double lockMoney = g_hedgePeakProfit * HedgeLockPct / 100.0;
+   if(lockMoney <= 0) return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(StringFind(comment, "HEDGE") < 0) continue;
+
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+      long type = PositionGetInteger(POSITION_TYPE);
+
+      if(vol <= 0) continue;
+
+      double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      if(tickSize <= 0 || tickValue <= 0) continue;
+
+      double moneyPerTick = (tickValue / tickSize) * vol;
+      if(moneyPerTick <= 0) continue;
+
+      double priceDist = (lockMoney * vol / SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX)) / moneyPerTick;
+      double desiredSL = 0;
+
+      if(type == POSITION_TYPE_BUY)
+         desiredSL = NormalizeDouble(open + priceDist, _Digits);
+      else
+         desiredSL = NormalizeDouble(open - priceDist, _Digits);
+
+      double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+
+      if(type == POSITION_TYPE_BUY)
+      {
+         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         desiredSL = MathMin(desiredSL, bid - stopLevel);
+         if(currentSL > 0 && desiredSL <= currentSL + 10 * _Point) continue;
+         if(desiredSL <= open) continue;
+      }
+      else
+      {
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         desiredSL = MathMax(desiredSL, ask + stopLevel);
+         if(currentSL > 0 && desiredSL >= currentSL - 10 * _Point) continue;
+         if(desiredSL >= open) continue;
+      }
+
+      if(trade.PositionModify(ticket, desiredSL, currentTP))
+         Print("HEDGE LOCK #", ticket, " SL=", DoubleToString(desiredSL, _Digits),
+               " R=", DoubleToString(hedgeR, 2));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Staged Unlock — close hedge gradually when recovery confirmed     |
+//+------------------------------------------------------------------+
+void ManageStagedUnlock()
+{
+   if(!Use_StagedUnlock || !g_hasBuy || !g_hasSell) return;
+
+   double hedgeProfit = 0;
+   double hedgeRisk = 0;
+   int hedgeCount = 0;
+   double totalHedgeVol = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(StringFind(comment, "HEDGE") < 0) continue;
+
+      hedgeCount++;
+      double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      hedgeProfit += profit;
+      totalHedgeVol += PositionGetDouble(POSITION_VOLUME);
+
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      long type = PositionGetInteger(POSITION_TYPE);
+
+      if(sl > 0 && vol > 0)
+      {
+         double risk = 0;
+         if(type == POSITION_TYPE_BUY)
+            OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, vol, open, sl, risk);
+         else
+            OrderCalcProfit(ORDER_TYPE_SELL, _Symbol, vol, open, sl, risk);
+         hedgeRisk += MathAbs(risk);
+      }
+   }
+
+   if(hedgeCount == 0 || hedgeRisk <= 0 || totalHedgeVol <= 0) return;
+
+   double hedgeR = hedgeProfit / hedgeRisk;
+   if(hedgeR < UnlockMinHedgeR) return;
+
+   if(Bars(_Symbol, g_currentTimeframe) - iBarShift(_Symbol, g_currentTimeframe, g_lastUnlockBar) < UnlockCooldownBars)
+      return;
+
+   // Close UnlockStepPct of total hedge volume
+   double closeVol = NormalizeDouble(totalHedgeVol * UnlockStepPct / 100.0, 2);
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(closeVol < minLot) return;
+   closeVol = MathFloor(closeVol / lotStep) * lotStep;
+
+   double closed = 0;
+   for(int i = PositionsTotal() - 1; i >= 0 && closed < closeVol; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(StringFind(comment, "HEDGE") < 0) continue;
+
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      double closeAmount = MathMin(vol, closeVol - closed);
+      if(closeAmount < minLot) continue;
+
+      if(MathAbs(closeAmount - vol) < lotStep / 2)
+      {
+         if(trade.PositionClose(ticket))
+         {
+            closed += vol;
+            g_lastUnlockBar = TimeCurrent();
+            Print("UNLOCK CLOSE #", ticket, " vol=", DoubleToString(vol, 2));
+         }
+      }
+      else
+      {
+         if(trade.PositionClosePartial(ticket, closeAmount))
+         {
+            closed += closeAmount;
+            g_lastUnlockBar = TimeCurrent();
+            Print("UNLOCK PARTIAL #", ticket, " vol=", DoubleToString(closeAmount, 2));
          }
       }
    }
@@ -2125,36 +2535,23 @@ void ManageTrailingStop()
              if(trailDistPoints < minTrailDist)
                 trailDistPoints = minTrailDist;
 
+             // For BUY: SL must be below current bid
              double newSL = NormalizeDouble(bid - trailDistPoints, _Digits);
 
-            // Only snap to step grid if step is meaningful relative to price
-            double stepSize = TrailingStepPips * _Point;
-            if(stepSize > 0 && stepSize < trailDistPoints * 0.5)
-               newSL = NormalizeDouble(newSL - MathMod(newSL - openPrice, stepSize), _Digits);
+              // Ensure SL is below current price - minimum broker distance
+              double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+              double maxSL = bid - stopLevel - minTrailDist;
+              if(newSL > maxSL)
+                 newSL = NormalizeDouble(maxSL, _Digits);
 
-            // Ensure SL is above entry (for BUY)
-            if(newSL <= openPrice)
-               newSL = NormalizeDouble(openPrice + trailDistPoints * 0.1, _Digits);
-
-            if(newSL > currentSL || currentSL == 0)
-            {
-               if(trade.PositionModify(ticket, newSL, currentTP))
-                  Print("TRAIL BUY #", ticket, " SL=", newSL, " profit=", DoubleToString(profitPips, 0), " pts");
-               else
-                  Print("TRAIL BUY FAILED #", ticket, " newSL=", newSL, " bid=", bid, " err=", trade.ResultRetcode());
-            }
-            else
-            {
-               // Debug: show why trail didn't move
-               static datetime lastTrailDbg = 0;
-               if(TimeCurrent() - lastTrailDbg >= 30)
-               {
-                  lastTrailDbg = TimeCurrent();
-                  Print("TRAIL BUY SKIP #", ticket, " newSL=", newSL, " <= currentSL=", currentSL,
-                        " profit=", DoubleToString(profitPips, 0), " pts",
-                        " dist=", DoubleToString(trailDistPoints, _Digits));
-               }
-            }
+             // Only move SL UP (trailing), never down for BUY
+             // Minimum step: only modify if SL moves at least 10 points
+             double minStep = 10 * _Point;
+             if((newSL > currentSL || currentSL == 0) && (currentSL == 0 || newSL - currentSL >= minStep))
+             {
+                if(trade.PositionModify(ticket, newSL, currentTP))
+                   Print("TRAIL BUY #", ticket, " SL=", newSL, " profit=", DoubleToString(profitPips, 0), " pts");
+             }
          }
       }
       else if(posType == POSITION_TYPE_SELL)
@@ -2173,55 +2570,42 @@ void ManageTrailingStop()
             }
          }
 
-         // Trailing stop
-         if(Use_Trailing_Stop && profitPips >= TrailingStartPips)
-         {
-             // Calculate trailing distance
-             double trailDistPoints = TrailingDistancePips * _Point;
-             if(TrailingMode == 1)
-             {
-                // ATR based trailing
-                double atrVal[];
-                if(CopyBuffer(g_trailAtrHandle, 0, 0, 1, atrVal) == 1)
-                   trailDistPoints = atrVal[0] * Trail_ATR_Multiplier;
-             }
+          // Trailing stop
+          if(Use_Trailing_Stop && profitPips >= TrailingStartPips)
+          {
+              // Calculate trailing distance
+              double trailDistPoints = TrailingDistancePips * _Point;
+              if(TrailingMode == 1)
+              {
+                 // ATR based trailing
+                 double atrVal[];
+                 if(CopyBuffer(g_trailAtrHandle, 0, 0, 1, atrVal) == 1)
+                    trailDistPoints = atrVal[0] * Trail_ATR_Multiplier;
+              }
 
-             // Safety: minimum trail distance = 20 points
-             double minTrailDist = 20 * _Point;
-             if(trailDistPoints < minTrailDist)
-                trailDistPoints = minTrailDist;
+              // Safety: minimum trail distance = 20 points
+              double minTrailDist = 20 * _Point;
+              if(trailDistPoints < minTrailDist)
+                 trailDistPoints = minTrailDist;
 
-             double newSL = NormalizeDouble(ask + trailDistPoints, _Digits);
+              // For SELL: SL must be ABOVE current ask
+              double newSL = NormalizeDouble(ask + trailDistPoints, _Digits);
 
-            // Only snap to step grid if step is meaningful relative to price
-            double stepSize = TrailingStepPips * _Point;
-            if(stepSize > 0 && stepSize < trailDistPoints * 0.5)
-               newSL = NormalizeDouble(newSL + MathMod(openPrice - newSL, stepSize), _Digits);
+              // Ensure SL is above current price + minimum broker distance
+              double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+              double minSL = ask + stopLevel + minTrailDist;
+              if(newSL < minSL)
+                 newSL = NormalizeDouble(minSL, _Digits);
 
-            // Ensure SL is below entry (for SELL)
-            if(newSL >= openPrice)
-               newSL = NormalizeDouble(openPrice - trailDistPoints * 0.1, _Digits);
-
-            if(newSL < currentSL || currentSL == 0)
-            {
-               if(trade.PositionModify(ticket, newSL, currentTP))
-                  Print("TRAIL SELL #", ticket, " SL=", newSL, " profit=", DoubleToString(profitPips, 0), " pts");
-               else
-                  Print("TRAIL SELL FAILED #", ticket, " newSL=", newSL, " ask=", ask, " err=", trade.ResultRetcode());
-            }
-            else
-            {
-               // Debug: show why trail didn't move
-               static datetime lastTrailDbgS = 0;
-               if(TimeCurrent() - lastTrailDbgS >= 30)
-               {
-                  lastTrailDbgS = TimeCurrent();
-                  Print("TRAIL SELL SKIP #", ticket, " newSL=", newSL, " >= currentSL=", currentSL,
-                        " profit=", DoubleToString(profitPips, 0), " pts",
-                        " dist=", DoubleToString(trailDistPoints, _Digits));
-               }
-            }
-         }
+              // Only move SL DOWN (trailing), never up for SELL
+              // Minimum step: only modify if SL moves at least 10 points
+              double minStep = 10 * _Point;
+              if((newSL < currentSL || currentSL == 0) && (currentSL == 0 || currentSL - newSL >= minStep))
+              {
+                 if(trade.PositionModify(ticket, newSL, currentTP))
+                    Print("TRAIL SELL #", ticket, " SL=", newSL, " profit=", DoubleToString(profitPips, 0), " pts");
+              }
+          }
       }
    }
 }
@@ -2255,7 +2639,7 @@ double GetSwingLow(int lookback)
       return 0;
 
    double swingLow = low[0];
-   for(int i = 1; i < lookback; i++)
+   for(int i = 1; i < lookback - 1; i++)
    {
       if(low[i] < low[i+1] && low[i] < low[i-1])
       {
@@ -2275,7 +2659,7 @@ double GetSwingHigh(int lookback)
       return 0;
 
    double swingHigh = high[0];
-   for(int i = 1; i < lookback; i++)
+   for(int i = 1; i < lookback - 1; i++)
    {
       if(high[i] > high[i+1] && high[i] > high[i-1])
       {
@@ -2292,6 +2676,27 @@ double GetRValue(double entryPrice, bool isBuy)
    double atr = GetSmartATR();
    if(atr <= 0) atr = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 100;
    return atr * SmartTrail_ATR_Normal;
+}
+
+//+------------------------------------------------------------------+
+//| Validate SL is within broker's allowed range                       |
+//+------------------------------------------------------------------+
+double ValidateSellSL(double newSL, double ask)
+{
+   double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double minSL = ask + stopLevel + 50 * _Point;  // 50 points buffer
+   if(newSL < minSL)
+      newSL = NormalizeDouble(minSL, _Digits);
+   return newSL;
+}
+
+double ValidateBuySL(double newSL, double bid)
+{
+   double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double maxSL = bid - stopLevel - 50 * _Point;  // 50 points buffer
+   if(newSL > maxSL)
+      newSL = NormalizeDouble(maxSL, _Digits);
+   return newSL;
 }
 
 //+------------------------------------------------------------------+
@@ -2380,8 +2785,11 @@ void ManageSmartTrail()
          }
 
          // Only move SL up, never down
-         if(newSL > 0 && newSL > currentSL)
+         // Minimum step: only modify if SL moves at least 10 points
+         double minStep = 10 * _Point;
+         if(newSL > 0 && newSL > currentSL && (currentSL == 0 || newSL - currentSL >= minStep))
          {
+            newSL = ValidateBuySL(newSL, bid);  // Ensure valid stops
             if(trade.PositionModify(ticket, newSL, currentTP))
             {
                static datetime lastSmartTrailLog = 0;
@@ -2440,8 +2848,11 @@ void ManageSmartTrail()
          }
 
          // Only move SL down, never up
-         if(newSL > 0 && (newSL < currentSL || currentSL == 0))
+         // Minimum step: only modify if SL moves at least 10 points
+         double minStep = 10 * _Point;
+         if(newSL > 0 && (newSL < currentSL || currentSL == 0) && (currentSL == 0 || currentSL - newSL >= minStep))
          {
+            newSL = ValidateSellSL(newSL, ask);  // Ensure valid stops
             if(trade.PositionModify(ticket, newSL, currentTP))
             {
                static datetime lastSmartTrailLogS = 0;
@@ -2583,6 +2994,7 @@ void ManagePctTrail()
          // Never move SL down
          if(newSL > currentSL)
          {
+            newSL = ValidateBuySL(newSL, bid);  // Ensure valid stops
             if(trade.PositionModify(ticket, newSL, currentTP))
             {
                static datetime lastPctLogB = 0;
@@ -2637,6 +3049,7 @@ void ManagePctTrail()
          // Never move SL up
          if(newSL < currentSL || currentSL == 0)
          {
+            newSL = ValidateSellSL(newSL, ask);  // Ensure valid stops
             if(trade.PositionModify(ticket, newSL, currentTP))
             {
                static datetime lastPctLogS = 0;
@@ -3421,6 +3834,8 @@ void DrawTradeLines()
       // Build info text
       boxText += "=== TRADE INFO ===\n";
       boxText += "Positions: " + IntegerToString(g_buyCount) + "B / " + IntegerToString(g_sellCount) + "S\n";
+      boxText += "Hedge State: " + HedgeStateText() + "\n";
+      boxText += "Hedge Cycles: " + IntegerToString(g_hedgeCycles) + "\n";
       boxText += "Total Lots: " + DoubleToString(g_totalCount * g_lot, 2) + "\n";
       boxText += "-------------------\n";
       boxText += "Entry: " + DoubleToString(g_avgPrice, _Digits) + "\n";
@@ -6221,9 +6636,29 @@ void ManagePairTrading(int idx)
          }
          else if(g_pts[idx].hasBuy && !g_pts[idx].hasSell)
          {
-            double distPips = (g_pts[idx].lastBuyPrice - ask) / pointVal / (double)g_pts[idx].pointDivider;
-            if(g_pts[idx].isCrypto) distPips = (g_pts[idx].lastBuyPrice - ask) / pointVal;
-            if(distPips >= HedgeDistancePips && g_pts[idx].sellCount < MaxHedgeCount)
+            bool shouldHedge = false;
+
+            if(HedgeMode == 0)
+            {
+               double distPips = (g_pts[idx].lastBuyPrice - ask) / pointVal / (double)g_pts[idx].pointDivider;
+               if(g_pts[idx].isCrypto) distPips = (g_pts[idx].lastBuyPrice - ask) / pointVal;
+               shouldHedge = (distPips >= HedgeDistancePips);
+            }
+            else if(HedgeMode == 1)
+            {
+               shouldHedge = (ask < g_pts[idx].buyAvgPrice);
+            }
+            else if(HedgeMode == 3)
+            {
+               if(iVolume(g_pts[idx].symbol, g_currentTimeframe, 0) <= 1)
+               {
+                  double close2 = iClose(g_pts[idx].symbol, g_currentTimeframe, 2);
+                  double close1 = iClose(g_pts[idx].symbol, g_currentTimeframe, 1);
+                  shouldHedge = (close2 < close1);
+               }
+            }
+
+            if(shouldHedge && g_pts[idx].sellCount < MaxHedgeCount)
             {
                double hedgeLot = NormalizeDouble(Lot * HedgeLotMultiplier, 2);
                double minLot = SymbolInfoDouble(g_pts[idx].symbol, SYMBOL_VOLUME_MIN);
@@ -6234,9 +6669,29 @@ void ManagePairTrading(int idx)
          }
          else if(g_pts[idx].hasSell && !g_pts[idx].hasBuy)
          {
-            double distPips = (ask - g_pts[idx].lastSellPrice) / pointVal / (double)g_pts[idx].pointDivider;
-            if(g_pts[idx].isCrypto) distPips = (ask - g_pts[idx].lastSellPrice) / pointVal;
-            if(distPips >= HedgeDistancePips && g_pts[idx].buyCount < MaxHedgeCount)
+            bool shouldHedge = false;
+
+            if(HedgeMode == 0)
+            {
+               double distPips = (ask - g_pts[idx].lastSellPrice) / pointVal / (double)g_pts[idx].pointDivider;
+               if(g_pts[idx].isCrypto) distPips = (ask - g_pts[idx].lastSellPrice) / pointVal;
+               shouldHedge = (distPips >= HedgeDistancePips);
+            }
+            else if(HedgeMode == 1)
+            {
+               shouldHedge = (ask > g_pts[idx].sellAvgPrice);
+            }
+            else if(HedgeMode == 3)
+            {
+               if(iVolume(g_pts[idx].symbol, g_currentTimeframe, 0) <= 1)
+               {
+                  double close2 = iClose(g_pts[idx].symbol, g_currentTimeframe, 2);
+                  double close1 = iClose(g_pts[idx].symbol, g_currentTimeframe, 1);
+                  shouldHedge = (close2 > close1);
+               }
+            }
+
+            if(shouldHedge && g_pts[idx].buyCount < MaxHedgeCount)
             {
                double hedgeLot = NormalizeDouble(Lot * HedgeLotMultiplier, 2);
                double minLot = SymbolInfoDouble(g_pts[idx].symbol, SYMBOL_VOLUME_MIN);
