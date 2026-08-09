@@ -111,7 +111,7 @@ input string          info2               = " "; //---=== Order Management ===--
 input bool            stop_algo           = true;     // Stop Auto trading during news
 input bool            close_open          = true;     // Close all open trades
 input bool            close_pending       = true;     // Delete all Pending orders
-input bool            close_zero          = true;     // Close all trades with profit
+input bool            close_zero          = false;    // Close all trades with profit
 input double          close_profit        = 1;        // Profit for closing all trades (in $)
 input bool            close_charts        = false;    // Close all Charts
 
@@ -144,8 +144,50 @@ input bool            Use_Breakeven       = false;
 input double          BreakevenStartPips  = 15;
 input double          BreakevenProfitPips = 5;
 
+input group "=== SMART TRAIL SETTINGS ==="
+input bool            Use_SmartTrail      = false;      // Enable Smart Trail
+input bool            SmartTrail_BreakEven = true;      // Stage 2: Break-even
+input double          SmartTrail_BE_R     = 0.8;        // Break-even at +X R
+input double          SmartTrail_BE_Buffer = 5;         // BE buffer in points
+input bool            SmartTrail_ProfitLock = true;     // Stage 3: Profit lock
+input double          SmartTrail_PL_R     = 1.2;        // Profit lock activates at +X R
+input double          SmartTrail_Locked_R = 0.4;        // Locked profit in R
+input bool            SmartTrail_ATR      = true;       // Stage 4: ATR trailing
+input int             SmartTrail_ATR_Period = 14;       // ATR period
+input double          SmartTrail_ATR_Normal = 2.0;      // Normal trend ATR multiplier
+input double          SmartTrail_ATR_Strong = 2.5;      // Strong trend ATR multiplier
+input double          SmartTrail_ATR_Weak = 1.3;        // Weak trend ATR multiplier
+input bool            SmartTrail_Structure = true;      // Stage 7: Structure trail
+input int             SmartTrail_SwingLookback = 10;    // Swing lookback bars
+input double          SmartTrail_StructureBuf = 5;      // Structure buffer points
+input bool            SmartTrail_Chandelier = true;     // Stage 8: Extreme profit
+input double          SmartTrail_ChandelierR = 2.5;     // Chandelier ATR multiplier
+input double          SmartTrail_MinStep  = 10;         // Minimum trail step points
+input int             SmartTrail_ADX_Period = 14;       // ADX period for trend strength
+input double          SmartTrail_ADX_Strong = 25;       // ADX threshold for strong trend
+input double          SmartTrail_ADX_Weak = 20;         // ADX threshold for weak trend
+
+input group "=== PRICE % TRAIL SETTINGS ==="
+input bool            Use_PctTrail          = true;     // Enable Price % Trail
+input double          PctTrail_ActivateR    = 0.8;      // Activate trail at +X R
+input double          PctTrail_Trail_Normal = 0.30;     // Normal market trail %
+input double          PctTrail_Trail_Strong = 0.45;     // Strong trend trail %
+input double          PctTrail_Trail_Choppy = 0.15;     // Choppy market trail %
+input double          PctTrail_ADX_Strong   = 25;       // ADX > = strong trend
+input double          PctTrail_ADX_Choppy   = 20;       // ADX < = choppy
+input double          PctTrail_Lock_R1      = 1.0;      // Profit lock tier 1 R
+input double          PctTrail_Lock_P1      = 30;       // Profit lock tier 1 %
+input double          PctTrail_Lock_R2      = 1.5;      // Profit lock tier 2 R
+input double          PctTrail_Lock_P2      = 50;       // Profit lock tier 2 %
+input double          PctTrail_Lock_R3      = 2.0;      // Profit lock tier 3 R
+input double          PctTrail_Lock_P3      = 65;       // Profit lock tier 3 %
+input double          PctTrail_Lock_R4      = 3.0;      // Profit lock tier 4 R
+input double          PctTrail_Lock_P4      = 80;       // Profit lock tier 4 %
+input double          PctTrail_MinStep      = 10;       // Min trail step (points)
+input int             PctTrail_ADX_Period   = 14;       // ADX period for trend
+
 input group "=== EQUITY ATR TRAIL ==="
-input bool                  Use_EquityATRTrail  = true;    // Enable Equity ATR Trail
+input bool                  Use_EquityATRTrail  = false;   // Enable Equity ATR Trail
 input ENUM_ATR_MULT_START   EquityATR_StartMult = ATR_MULT_2_0; // Start trail after equity drops ATR × this from peak
 input ENUM_ATR_MULT_CLOSE   EquityATR_CloseMult = ATR_CLOSE_3_0; // Close when equity drops ATR × this from peak
 input int                   EquityATR_CloseSide = 3;        // 0=All, 1=Buys, 2=Sells, 3=Profitable side
@@ -247,6 +289,8 @@ double   g_sellAvgPrice;
 double   g_newSL;
 bool     g_canTrade;
 datetime g_timeoutTime;
+datetime g_lastModifyFailTime;  // Throttle modify retries after failure
+datetime g_lastServerFailTime;  // Global throttle for ALL server requests
 double   g_initialBalance;
 bool     g_firstRun;
 int      g_averagingCount;
@@ -282,6 +326,10 @@ int      g_equityAtrHandle;
 // Equity ATR trail variables
 double   g_peakEquity;
 bool     g_equityTrailActive;
+
+// Smart trail variables
+int      g_smartTrailAtrHandle;
+int      g_smartTrailAdxHandle;
 
 // Manual ATR calculation
 double   g_manualATR;
@@ -459,12 +507,24 @@ int OnInit()
    g_peakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
    g_equityTrailActive = false;
    g_equityAtrHandle = iATR(_Symbol, EquityATR_Timeframe, EquityATR_Period);
-   if(g_equityAtrHandle == INVALID_HANDLE)
-      Print("EQUITY ATR INIT FAILED");
-   else
-      Print("EQUITY ATR INIT OK: handle=", g_equityAtrHandle, " tf=", EnumToString(EquityATR_Timeframe));
+    if(g_equityAtrHandle == INVALID_HANDLE)
+       Print("EQUITY ATR INIT FAILED");
+    else
+       Print("EQUITY ATR INIT OK: handle=", g_equityAtrHandle, " tf=", EnumToString(EquityATR_Timeframe));
 
-   // Parse multi-pair list
+    // Initialize Smart Trail ATR + ADX
+    g_smartTrailAtrHandle = iATR(_Symbol, PERIOD_CURRENT, SmartTrail_ATR_Period);
+    g_smartTrailAdxHandle = iADX(_Symbol, PERIOD_CURRENT, SmartTrail_ADX_Period);
+    if(g_smartTrailAtrHandle == INVALID_HANDLE)
+       Print("SMART TRAIL ATR INIT FAILED");
+    else
+       Print("SMART TRAIL ATR INIT OK: handle=", g_smartTrailAtrHandle);
+    if(g_smartTrailAdxHandle == INVALID_HANDLE)
+       Print("SMART TRAIL ADX INIT FAILED");
+    else
+       Print("SMART TRAIL ADX INIT OK: handle=", g_smartTrailAdxHandle);
+
+    // Parse multi-pair list
    g_pairCount = 0;
    if(Use_MultiPair)
    {
@@ -602,8 +662,12 @@ void OnDeinit(const int reason)
       IndicatorRelease(g_atrHandle);
    if(g_trailAtrHandle != INVALID_HANDLE)
       IndicatorRelease(g_trailAtrHandle);
-   if(g_equityAtrHandle != INVALID_HANDLE)
-      IndicatorRelease(g_equityAtrHandle);
+    if(g_equityAtrHandle != INVALID_HANDLE)
+       IndicatorRelease(g_equityAtrHandle);
+    if(g_smartTrailAtrHandle != INVALID_HANDLE)
+       IndicatorRelease(g_smartTrailAtrHandle);
+    if(g_smartTrailAdxHandle != INVALID_HANDLE)
+       IndicatorRelease(g_smartTrailAdxHandle);
 
    // Remove all objects
    ObjectsDeleteAll(0, "NEWS_");
@@ -620,6 +684,16 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   // Skip everything when market is closed
+   double _chkAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double _chkBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(_chkAsk <= 0 || _chkBid <= 0)
+      return;
+
+   // Global cooldown after ANY server failure (60 seconds)
+   if(g_lastServerFailTime > 0 && TimeCurrent() - g_lastServerFailTime < 60)
+      return;
+
    // Recalculate manual ATR every tick
    CalculateManualATR();
 
@@ -721,11 +795,23 @@ void OnTick()
       return;
    }
 
-   // TRAILING STOP
-   if(Use_Trailing_Stop && g_totalCount > 0)
-   {
-      ManageTrailingStop();
-   }
+    // TRAILING STOP
+    if(Use_Trailing_Stop && g_totalCount > 0)
+    {
+       ManageTrailingStop();
+    }
+
+    // SMART TRAIL
+    if(Use_SmartTrail && g_totalCount > 0)
+    {
+       ManageSmartTrail();
+    }
+
+    // PRICE % TRAIL
+    if(Use_PctTrail && g_totalCount > 0)
+    {
+       ManagePctTrail();
+    }
    
    // EQUITY ATR TRAIL (CLOSE ALL)
    if(Use_EquityATRTrail && g_totalCount > 0)
@@ -748,11 +834,30 @@ void OnTick()
        ManageHedge();
     }
 
-    // Modify TP for all positions
+    // Modify TP for all positions - only when market is open, throttle after failure
+    // Only on new bar to stop TP jumping every tick
     if(g_needModify && g_totalCount > 0)
     {
-       ModifyAllTP();
-       g_needModify = false;
+       static datetime lastTpBar = 0;
+       datetime curTpBar = iTime(_Symbol, PERIOD_CURRENT, 0);
+       bool tpNewBar = (curTpBar != lastTpBar);
+       lastTpBar = curTpBar;
+
+       // Don't retry modifications for 30 seconds after a failure
+       if(g_lastModifyFailTime > 0 && TimeCurrent() - g_lastModifyFailTime < 30)
+       {
+          g_needModify = false;
+       }
+       else if(tpNewBar)
+       {
+          double _ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+          double _bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+          if(_ask > 0 && _bid > 0)
+          {
+             ModifyAllTP();
+          }
+          g_needModify = false;
+       }
     }
 
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -781,16 +886,22 @@ void OnTick()
          }
          if(!CheckVolatilityFilter())
         {
-           Print("BLOCKED by Volatility Filter (ATR spike)");
+           static datetime lastAtrBlockLog = 0;
+           if(TimeCurrent() - lastAtrBlockLog >= 60) { lastAtrBlockLog = TimeCurrent(); Print("BLOCKED by Volatility Filter (ATR spike)"); }
            return;
         }
         if(!CheckRangeFilter())
         {
-           Print("BLOCKED by Range Filter (daily range out of bounds)");
+           static datetime lastRangeBlockLog = 0;
+           if(TimeCurrent() - lastRangeBlockLog >= 60) { lastRangeBlockLog = TimeCurrent(); Print("BLOCKED by Range Filter (daily range out of bounds)"); }
            return;
         }
 
-       // Fresh bar check - log every tick for first few to debug
+        // Minimum delay between ANY trades
+        if(TimeCurrent() - g_lastTradeTime < MinTradeDelaySec)
+           return;
+
+        // Fresh bar check - log every tick for first few to debug
        if(iVolume(_Symbol, g_currentTimeframe, 0) > 1)
           return;
 
@@ -809,6 +920,7 @@ void OnTick()
           Print("TRYING BUY: lot=", DoubleToString(g_lot, 2), " ask=", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_ASK), _Digits));
           if(OpenBuy())
           {
+             g_lastTradeTime = TimeCurrent();
              g_timeoutTime = TimeCurrent() + (TimeOut_Hours * 3600);
              g_averagingCount = 0;
              g_buyAveragingCount = 0;
@@ -821,6 +933,7 @@ void OnTick()
           Print("TRYING SELL: lot=", DoubleToString(g_lot, 2), " bid=", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_BID), _Digits));
           if(OpenSell())
           {
+             g_lastTradeTime = TimeCurrent();
              g_timeoutTime = TimeCurrent() + (TimeOut_Hours * 3600);
              g_averagingCount = 0;
              g_buyAveragingCount = 0;
@@ -1778,11 +1891,12 @@ bool OpenBuy()
       Print("BUY opened: ", g_lot, " lots at ", ask);
       return true;
    }
-   else
-   {
-      Print("BUY error: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
-      return false;
-   }
+    else
+    {
+       g_lastServerFailTime = TimeCurrent();
+       Print("BUY error: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+       return false;
+    }
 }
 
 //+------------------------------------------------------------------+
@@ -1796,11 +1910,12 @@ bool OpenSell()
       Print("SELL opened: ", g_lot, " lots at ", bid);
       return true;
    }
-   else
-   {
-      Print("SELL error: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
-      return false;
-   }
+    else
+    {
+       g_lastServerFailTime = TimeCurrent();
+       Print("SELL error: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+       return false;
+    }
 }
 
 //+------------------------------------------------------------------+
@@ -1835,7 +1950,10 @@ void ManageHedge()
          if(trade.Sell(hedgeLot, _Symbol, bid, 0, 0, comment))
             Print("HEDGE SELL: ", hedgeLot, " at ", bid);
          else
+         {
+            g_lastServerFailTime = TimeCurrent();
             Print("HEDGE SELL FAILED: lot=", hedgeLot, " bid=", bid, " err=", trade.ResultRetcode(), " msg=", trade.ResultRetcodeDescription());
+         }
       }
       else
       {
@@ -1863,7 +1981,10 @@ void ManageHedge()
          if(trade.Buy(hedgeLot, _Symbol, ask, 0, 0, comment))
             Print("HEDGE BUY: ", hedgeLot, " at ", ask);
          else
+         {
+            g_lastServerFailTime = TimeCurrent();
             Print("HEDGE BUY FAILED: lot=", hedgeLot, " ask=", ask, " err=", trade.ResultRetcode(), " msg=", trade.ResultRetcodeDescription());
+         }
       }
       else
       {
@@ -2015,6 +2136,434 @@ void ManageTrailingStop()
                   Print("TRAIL SELL SKIP #", ticket, " newSL=", newSL, " >= currentSL=", currentSL,
                         " profit=", DoubleToString(profitPips, 0), " pts",
                         " dist=", DoubleToString(trailDistPoints, _Digits));
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| SMART TRAIL - Multi-stage adaptive trailing stop                  |
+//+------------------------------------------------------------------+
+double GetSmartATR()
+{
+   double atrVal[];
+   if(CopyBuffer(g_smartTrailAtrHandle, 0, 0, 1, atrVal) == 1)
+      return atrVal[0];
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+double GetSmartADX()
+{
+   double adxVal[];
+   if(CopyBuffer(g_smartTrailAdxHandle, 0, 0, 1, adxVal) == 1)
+      return adxVal[0];
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+double GetSwingLow(int lookback)
+{
+   double low[];
+   ArraySetAsSeries(low, true);
+   if(CopyLow(_Symbol, PERIOD_CURRENT, 0, lookback, low) < lookback)
+      return 0;
+
+   double swingLow = low[0];
+   for(int i = 1; i < lookback; i++)
+   {
+      if(low[i] < low[i+1] && low[i] < low[i-1])
+      {
+         if(low[i] < swingLow)
+            swingLow = low[i];
+      }
+   }
+   return swingLow;
+}
+
+//+------------------------------------------------------------------+
+double GetSwingHigh(int lookback)
+{
+   double high[];
+   ArraySetAsSeries(high, true);
+   if(CopyHigh(_Symbol, PERIOD_CURRENT, 0, lookback, high) < lookback)
+      return 0;
+
+   double swingHigh = high[0];
+   for(int i = 1; i < lookback; i++)
+   {
+      if(high[i] > high[i+1] && high[i] > high[i-1])
+      {
+         if(high[i] > swingHigh)
+            swingHigh = high[i];
+      }
+   }
+   return swingHigh;
+}
+
+//+------------------------------------------------------------------+
+double GetRValue(double entryPrice, bool isBuy)
+{
+   double atr = GetSmartATR();
+   if(atr <= 0) atr = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 100;
+   return atr * SmartTrail_ATR_Normal;
+}
+
+//+------------------------------------------------------------------+
+void ManageSmartTrail()
+{
+   if(!Use_SmartTrail || g_totalCount == 0) return;
+
+   double atr = GetSmartATR();
+   if(atr <= 0) return;
+
+   double adx = GetSmartADX();
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0 || ask <= 0) return;
+
+   // Determine ATR multiplier based on ADX trend strength
+   double atrMult = SmartTrail_ATR_Normal;
+   if(adx >= SmartTrail_ADX_Strong)
+      atrMult = SmartTrail_ATR_Strong;
+   else if(adx < SmartTrail_ADX_Weak)
+      atrMult = SmartTrail_ATR_Weak;
+
+   double trailDist = atr * atrMult;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
+
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+      long posType = PositionGetInteger(POSITION_TYPE);
+
+      if(posType != POSITION_TYPE_BUY && posType != POSITION_TYPE_SELL) continue;
+
+      // Calculate R value (risk = entry to initial SL distance)
+      double R = atr * SmartTrail_ATR_Normal;
+      if(R <= 0) continue;
+
+      double newSL = 0;
+
+      if(posType == POSITION_TYPE_BUY)
+      {
+         double profitPts = (bid - openPrice) / _Point;
+
+         // Stage 8: Extreme profit - Chandelier exit
+         if(SmartTrail_Chandelier && profitPts >= SmartTrail_ChandelierR * R / _Point)
+         {
+            double highestHigh = GetSwingHigh(SmartTrail_SwingLookback);
+            if(highestHigh <= 0) highestHigh = bid;
+            newSL = NormalizeDouble(highestHigh - atr * SmartTrail_ChandelierR, _Digits);
+         }
+         // Stage 7: Structure trail - swing low based
+         else if(SmartTrail_Structure && profitPts >= SmartTrail_ATR_Normal * R / _Point)
+         {
+            double swingLow = GetSwingLow(SmartTrail_SwingLookback);
+            double structureSL = NormalizeDouble(swingLow - SmartTrail_StructureBuf * _Point, _Digits);
+            double atrSL = NormalizeDouble(bid - trailDist, _Digits);
+            newSL = MathMax(structureSL, atrSL);
+         }
+         // Stage 4: Adaptive ATR trailing
+         else if(SmartTrail_ATR && profitPts >= SmartTrail_PL_R * R / _Point)
+         {
+            newSL = NormalizeDouble(bid - trailDist, _Digits);
+         }
+         // Stage 3: Profit lock
+         else if(SmartTrail_ProfitLock && profitPts >= SmartTrail_PL_R * R / _Point)
+         {
+            double lockedPrice = openPrice + (SmartTrail_Locked_R * R);
+            newSL = NormalizeDouble(lockedPrice, _Digits);
+         }
+         // Stage 2: Break-even
+         else if(SmartTrail_BreakEven && profitPts >= SmartTrail_BE_R * R / _Point)
+         {
+            newSL = NormalizeDouble(openPrice + SmartTrail_BE_Buffer * _Point, _Digits);
+         }
+
+         // Enforce minimum step
+         if(newSL > 0 && currentSL > 0)
+         {
+            if(newSL - currentSL < SmartTrail_MinStep * _Point)
+               continue;
+         }
+
+         // Only move SL up, never down
+         if(newSL > 0 && newSL > currentSL)
+         {
+            if(trade.PositionModify(ticket, newSL, currentTP))
+            {
+               static datetime lastSmartTrailLog = 0;
+               if(TimeCurrent() - lastSmartTrailLog >= 30)
+               {
+                  lastSmartTrailLog = TimeCurrent();
+                  Print("SMART TRAIL BUY #", ticket, " SL=", newSL,
+                        " ADX=", DoubleToString(adx, 1),
+                        " ATR=", DoubleToString(atr, _Digits),
+                        " mult=", DoubleToString(atrMult, 1));
+               }
+            }
+         }
+      }
+      else if(posType == POSITION_TYPE_SELL)
+      {
+         double profitPts = (openPrice - ask) / _Point;
+
+         // Stage 8: Extreme profit - Chandelier exit
+         if(SmartTrail_Chandelier && profitPts >= SmartTrail_ChandelierR * R / _Point)
+         {
+            double lowestLow = GetSwingLow(SmartTrail_SwingLookback);
+            if(lowestLow <= 0) lowestLow = ask;
+            newSL = NormalizeDouble(lowestLow + atr * SmartTrail_ChandelierR, _Digits);
+         }
+         // Stage 7: Structure trail - swing high based
+         else if(SmartTrail_Structure && profitPts >= SmartTrail_ATR_Normal * R / _Point)
+         {
+            double swingHigh = GetSwingHigh(SmartTrail_SwingLookback);
+            double structureSL = NormalizeDouble(swingHigh + SmartTrail_StructureBuf * _Point, _Digits);
+            double atrSL = NormalizeDouble(ask + trailDist, _Digits);
+            newSL = MathMin(structureSL, atrSL);
+         }
+         // Stage 4: Adaptive ATR trailing
+         else if(SmartTrail_ATR && profitPts >= SmartTrail_PL_R * R / _Point)
+         {
+            newSL = NormalizeDouble(ask + trailDist, _Digits);
+         }
+         // Stage 3: Profit lock
+         else if(SmartTrail_ProfitLock && profitPts >= SmartTrail_PL_R * R / _Point)
+         {
+            double lockedPrice = openPrice - (SmartTrail_Locked_R * R);
+            newSL = NormalizeDouble(lockedPrice, _Digits);
+         }
+         // Stage 2: Break-even
+         else if(SmartTrail_BreakEven && profitPts >= SmartTrail_BE_R * R / _Point)
+         {
+            newSL = NormalizeDouble(openPrice - SmartTrail_BE_Buffer * _Point, _Digits);
+         }
+
+         // Enforce minimum step
+         if(newSL > 0 && currentSL > 0)
+         {
+            if(currentSL - newSL < SmartTrail_MinStep * _Point)
+               continue;
+         }
+
+         // Only move SL down, never up
+         if(newSL > 0 && (newSL < currentSL || currentSL == 0))
+         {
+            if(trade.PositionModify(ticket, newSL, currentTP))
+            {
+               static datetime lastSmartTrailLogS = 0;
+               if(TimeCurrent() - lastSmartTrailLogS >= 30)
+               {
+                  lastSmartTrailLogS = TimeCurrent();
+                  Print("SMART TRAIL SELL #", ticket, " SL=", newSL,
+                        " ADX=", DoubleToString(adx, 1),
+                        " ATR=", DoubleToString(atr, _Digits),
+                        " mult=", DoubleToString(atrMult, 1));
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| PRICE % TRAIL - Price-distance percentage trailing                |
+//|  BUY:  SL = HighestPriceSinceEntry x (1 - Trail%)                 |
+//|  SELL: SL = LowestPriceSinceEntry  x (1 + Trail%)                 |
+//+------------------------------------------------------------------+
+double GetHighestSinceEntry(datetime entryTime, double fallback)
+{
+   int shift = iBarShift(_Symbol, PERIOD_CURRENT, entryTime);
+   if(shift < 1) return fallback;
+
+   double high[];
+   ArraySetAsSeries(high, true);
+   if(CopyHigh(_Symbol, PERIOD_CURRENT, 0, shift + 1, high) < shift + 1)
+      return fallback;
+
+   double maxH = high[0];
+   for(int k = 1; k <= shift; k++)
+   {
+      if(high[k] > maxH) maxH = high[k];
+   }
+   return maxH;
+}
+
+//+------------------------------------------------------------------+
+double GetLowestSinceEntry(datetime entryTime, double fallback)
+{
+   int shift = iBarShift(_Symbol, PERIOD_CURRENT, entryTime);
+   if(shift < 1) return fallback;
+
+   double low[];
+   ArraySetAsSeries(low, true);
+   if(CopyLow(_Symbol, PERIOD_CURRENT, 0, shift + 1, low) < shift + 1)
+      return fallback;
+
+   double minL = low[0];
+   for(int k = 1; k <= shift; k++)
+   {
+      if(low[k] < minL) minL = low[k];
+   }
+   return minL;
+}
+
+//+------------------------------------------------------------------+
+void ManagePctTrail()
+{
+   if(!Use_PctTrail || g_totalCount == 0) return;
+
+   double atr = GetATRValue();
+   if(atr <= 0) return;
+
+   double adx = GetSmartADX();
+   if(adx <= 0) adx = PctTrail_Trail_Normal; // no ADX data, use normal
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0 || ask <= 0) return;
+
+   // R = risk per trade (entry to initial SL). Use ATR as risk proxy
+   double R = atr;
+
+   // Choose trail % based on trend strength
+   double trailPct = PctTrail_Trail_Normal;
+   if(adx >= PctTrail_ADX_Strong)
+      trailPct = PctTrail_Trail_Strong;
+   else if(adx < PctTrail_ADX_Choppy)
+      trailPct = PctTrail_Trail_Choppy;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
+
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+      long posType = PositionGetInteger(POSITION_TYPE);
+      datetime entryTime = (datetime)PositionGetInteger(POSITION_TIME);
+
+      double newSL = 0;
+
+      if(posType == POSITION_TYPE_BUY)
+      {
+         double highest = GetHighestSinceEntry(entryTime, bid);
+         double profitR = (bid - openPrice) / R;
+         if(profitR < PctTrail_ActivateR) continue;
+
+         double maxProfitR = (highest - openPrice) / R;
+
+         // Determine lock % based on max profit reached
+         double lockPct = 0;
+         if(maxProfitR >= PctTrail_Lock_R4) lockPct = PctTrail_Lock_P4;
+         else if(maxProfitR >= PctTrail_Lock_R3) lockPct = PctTrail_Lock_P3;
+         else if(maxProfitR >= PctTrail_Lock_R2) lockPct = PctTrail_Lock_P2;
+         else if(maxProfitR >= PctTrail_Lock_R1) lockPct = PctTrail_Lock_P1;
+         else if(profitR >= 0.5)
+         {
+            // BE protection below tier 1 - use a real buffer, not 2 points
+            double beBuffer = MathMax(_Point * 20, atr * 0.05);
+            newSL = NormalizeDouble(openPrice + beBuffer, _Digits);
+         }
+
+         // Locked profit SL: openPrice + (maxProfit x lockPct)
+         double slLock = openPrice + (highest - openPrice) * (lockPct / 100.0);
+
+         // Price % trailing SL: highest x (1 - trail%)
+         double slTrail = NormalizeDouble(highest * (1.0 - trailPct / 100.0), _Digits);
+
+         // Take the more protective (higher) of the two
+         newSL = MathMax(slLock, slTrail);
+
+         // Ensure SL is not too close to current price (avoid noise stop-outs)
+         double minDist = MathMax(atr * 0.10, _Point * 20);
+         if(bid - newSL < minDist)
+            newSL = NormalizeDouble(bid - minDist, _Digits);
+
+         // Enforce minimum step
+         if(currentSL > 0 && newSL - currentSL < PctTrail_MinStep * _Point)
+            continue;
+
+         // Never move SL down
+         if(newSL > currentSL)
+         {
+            if(trade.PositionModify(ticket, newSL, currentTP))
+            {
+               static datetime lastPctLogB = 0;
+               if(TimeCurrent() - lastPctLogB >= 30)
+               {
+                  lastPctLogB = TimeCurrent();
+                  Print("PCT TRAIL BUY #", ticket, " SL=", newSL,
+                        " high=", DoubleToString(highest, _Digits),
+                        " trail%=", DoubleToString(trailPct, 2),
+                        " lock%=", DoubleToString(lockPct, 0));
+               }
+            }
+         }
+      }
+      else if(posType == POSITION_TYPE_SELL)
+      {
+         double lowest = GetLowestSinceEntry(entryTime, ask);
+         double profitR = (openPrice - ask) / R;
+         if(profitR < PctTrail_ActivateR) continue;
+
+         double maxProfitR = (openPrice - lowest) / R;
+
+         double lockPct = 0;
+         if(maxProfitR >= PctTrail_Lock_R4) lockPct = PctTrail_Lock_P4;
+         else if(maxProfitR >= PctTrail_Lock_R3) lockPct = PctTrail_Lock_P3;
+         else if(maxProfitR >= PctTrail_Lock_R2) lockPct = PctTrail_Lock_P2;
+         else if(maxProfitR >= PctTrail_Lock_R1) lockPct = PctTrail_Lock_P1;
+         else if(profitR >= 0.5)
+         {
+            // BE protection below tier 1 - use a real buffer, not 2 points
+            double beBuffer = MathMax(_Point * 20, atr * 0.05);
+            newSL = NormalizeDouble(openPrice - beBuffer, _Digits);
+         }
+
+         // Locked profit SL: openPrice - (maxProfit x lockPct)
+         double slLock = openPrice - (openPrice - lowest) * (lockPct / 100.0);
+
+         // Price % trailing SL: lowest x (1 + trail%)
+         double slTrail = NormalizeDouble(lowest * (1.0 + trailPct / 100.0), _Digits);
+
+         newSL = MathMin(slLock, slTrail);
+
+         // Ensure SL is not too close to current price (avoid noise stop-outs)
+         double minDist = MathMax(atr * 0.10, _Point * 20);
+         if(newSL - ask < minDist)
+            newSL = NormalizeDouble(ask + minDist, _Digits);
+
+         // Enforce minimum step
+         if(currentSL > 0 && currentSL - newSL < PctTrail_MinStep * _Point)
+            continue;
+
+         // Never move SL up
+         if(newSL < currentSL || currentSL == 0)
+         {
+            if(trade.PositionModify(ticket, newSL, currentTP))
+            {
+               static datetime lastPctLogS = 0;
+               if(TimeCurrent() - lastPctLogS >= 30)
+               {
+                  lastPctLogS = TimeCurrent();
+                  Print("PCT TRAIL SELL #", ticket, " SL=", newSL,
+                        " low=", DoubleToString(lowest, _Digits),
+                        " trail%=", DoubleToString(trailPct, 2),
+                        " lock%=", DoubleToString(lockPct, 0));
                }
             }
          }
@@ -2704,18 +3253,23 @@ bool CheckVolatilityFilter()
    double prevATR = GetATRPrevValue();
 
    if(curATR <= 0 || prevATR <= 0)
-   {
-      Print("ATR FILTER: values zero (cur=", DoubleToString(curATR, _Digits),
-            " prev=", DoubleToString(prevATR, _Digits), ") - allowing trade");
       return true;
-   }
 
    double ratio = curATR / prevATR;
-   Print("ATR FILTER: cur=", DoubleToString(curATR, _Digits),
-         " prev=", DoubleToString(prevATR, _Digits),
-         " ratio=", DoubleToString(ratio, 2),
-         " threshold=", DoubleToString(ATR_Multiplier, 1),
-         (ratio > ATR_Multiplier ? " BLOCKED" : " PASSED"));
+
+   // Throttle debug prints - only log once per 60 seconds per symbol
+   static string lastAtrSymbol = "";
+   static datetime lastAtrLog = 0;
+   if(_Symbol != lastAtrSymbol || TimeCurrent() - lastAtrLog >= 60)
+   {
+      lastAtrSymbol = _Symbol;
+      lastAtrLog = TimeCurrent();
+      Print("ATR FILTER: cur=", DoubleToString(curATR, _Digits),
+            " prev=", DoubleToString(prevATR, _Digits),
+            " ratio=", DoubleToString(ratio, 2),
+            " threshold=", DoubleToString(ATR_Multiplier, 1),
+            (ratio > ATR_Multiplier ? " BLOCKED" : " PASSED"));
+   }
 
    if(curATR > prevATR * ATR_Multiplier) return false;
    return true;
@@ -2748,27 +3302,37 @@ bool CheckRangeFilter()
       maxRange = RangeMaxPips;
    }
 
-   // Debug print
-   Print("RANGE FILTER: range=", DoubleToString(rangeDisplay, 1),
-         " min=", DoubleToString(minRange, 1),
-         " max=", DoubleToString(maxRange, 1),
-         " high=", DoubleToString(high, _Digits),
-         " low=", DoubleToString(low, _Digits),
-         " point=", DoubleToString(_Point, _Digits));
+    // Debug print - throttle to once per 60 seconds per symbol
+    static string lastRangeSymbol = "";
+    static datetime lastRangeLog = 0;
+    if(_Symbol != lastRangeSymbol || TimeCurrent() - lastRangeLog >= 60)
+    {
+       lastRangeSymbol = _Symbol;
+       lastRangeLog = TimeCurrent();
+       Print("RANGE FILTER: range=", DoubleToString(rangeDisplay, 1),
+             " min=", DoubleToString(minRange, 1),
+             " max=", DoubleToString(maxRange, 1),
+             " high=", DoubleToString(high, _Digits),
+             " low=", DoubleToString(low, _Digits),
+             " point=", DoubleToString(_Point, _Digits));
+       if(rangeDisplay < minRange || rangeDisplay > maxRange)
+          Print("RANGE FILTER: BLOCKED (out of range)");
+       else
+          Print("RANGE FILTER: PASSED");
+    }
 
-   if(rangeDisplay < minRange || rangeDisplay > maxRange)
-   {
-      Print("RANGE FILTER: BLOCKED (out of range)");
-      return false;
-   }
-   Print("RANGE FILTER: PASSED");
-   return true;
+    if(rangeDisplay < minRange || rangeDisplay > maxRange)
+       return false;
+    return true;
 }
 
 //+------------------------------------------------------------------+
 void ModifyAllTP()
 {
    if(g_totalCount == 0) return;
+
+   g_lastModifyFailTime = 0;  // Reset at start
+   g_lastServerFailTime = 0;  // Reset at start
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -2807,14 +3371,25 @@ void ModifyAllTP()
             if(targetTP > 0 && MathAbs(currentTP - targetTP) > _Point)
             {
                if(!trade.PositionModify(ticket, 0, targetTP))
+               {
+                  g_lastModifyFailTime = TimeCurrent();
+                  g_lastServerFailTime = TimeCurrent();
                   Print("SEPARATE TP FAIL #", ticket, " tp=", targetTP, " err=", trade.ResultRetcode());
+               }
                else
                   Print("SEPARATE TP SET #", ticket, " tp=", targetTP);
             }
          }
          else
          {
-            if(currentTP != 0) trade.PositionModify(ticket, 0, 0);
+            if(currentTP != 0)
+            {
+               if(!trade.PositionModify(ticket, 0, 0))
+               {
+                  g_lastModifyFailTime = TimeCurrent();
+                  g_lastServerFailTime = TimeCurrent();
+               }
+            }
          }
       }
       else
@@ -2832,7 +3407,13 @@ void ModifyAllTP()
                if(ask - g_newTP < minTPDist) g_newTP = NormalizeDouble(ask - minTPDist, _Digits);
             }
             if(MathAbs(currentTP - g_newTP) > _Point)
-               trade.PositionModify(ticket, 0, g_newTP);
+            {
+               if(!trade.PositionModify(ticket, 0, g_newTP))
+               {
+                  g_lastModifyFailTime = TimeCurrent();
+                  g_lastServerFailTime = TimeCurrent();
+               }
+            }
          }
       }
    }
@@ -2848,7 +3429,8 @@ void CloseAllPositions()
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != g_magic) continue;
 
-      trade.PositionClose(ticket);
+      if(!trade.PositionClose(ticket))
+         g_lastServerFailTime = TimeCurrent();
       Sleep(100);
    }
 }
@@ -4869,16 +5451,26 @@ void ManagePairModifyTP(int idx)
          if(posType == POSITION_TYPE_BUY) targetTP = g_pts[idx].buyTP;
          else if(posType == POSITION_TYPE_SELL) targetTP = g_pts[idx].sellTP;
          if(targetTP > 0 && MathAbs(currentTP - targetTP) > SymbolInfoDouble(g_pts[idx].symbol, SYMBOL_POINT))
-            g_pts[idx].trade.PositionModify(ticket, 0, targetTP);
+         {
+            if(!g_pts[idx].trade.PositionModify(ticket, 0, targetTP))
+               g_lastServerFailTime = TimeCurrent();
+         }
       }
       else if(g_pts[idx].hasBuy && g_pts[idx].hasSell && !Use_SeparateTP)
       {
-         if(currentTP != 0) g_pts[idx].trade.PositionModify(ticket, 0, 0);
+         if(currentTP != 0)
+         {
+            if(!g_pts[idx].trade.PositionModify(ticket, 0, 0))
+               g_lastServerFailTime = TimeCurrent();
+         }
       }
       else
       {
          if(g_pts[idx].newTP > 0 && MathAbs(currentTP - g_pts[idx].newTP) > SymbolInfoDouble(g_pts[idx].symbol, SYMBOL_POINT))
-            g_pts[idx].trade.PositionModify(ticket, 0, g_pts[idx].newTP);
+         {
+            if(!g_pts[idx].trade.PositionModify(ticket, 0, g_pts[idx].newTP))
+               g_lastServerFailTime = TimeCurrent();
+         }
       }
    }
    g_pts[idx].needModify = false;
@@ -4896,7 +5488,10 @@ bool OpenPairBuy(int idx)
       return true;
    }
    else
+   {
+      g_lastServerFailTime = TimeCurrent();
       Print("MP BUY FAIL: ", g_pts[idx].symbol, " err=", g_pts[idx].trade.ResultRetcode(), " msg=", g_pts[idx].trade.ResultRetcodeDescription());
+   }
    return false;
 }
 
@@ -4912,7 +5507,10 @@ bool OpenPairSell(int idx)
       return true;
    }
    else
+   {
+      g_lastServerFailTime = TimeCurrent();
       Print("MP SELL FAIL: ", g_pts[idx].symbol, " err=", g_pts[idx].trade.ResultRetcode(), " msg=", g_pts[idx].trade.ResultRetcodeDescription());
+   }
    return false;
 }
 
@@ -5256,6 +5854,10 @@ void ManagePairTrading(int idx)
 void ManageMultiPair()
 {
    if(!Use_MultiPair || g_pairCount == 0) return;
+
+   // Global cooldown after ANY server failure (60 seconds)
+   if(g_lastServerFailTime > 0 && TimeCurrent() - g_lastServerFailTime < 60)
+      return;
 
    static datetime mpTickLog = 0;
    if(TimeCurrent() - mpTickLog > 30)
