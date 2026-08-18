@@ -1,0 +1,3143 @@
+//+------------------------------------------------------------------+
+//| Euro Scalper NDD - MQL5 conversion                              |
+//| Converted from user-supplied MT4 source.                        |
+//| IMPORTANT: This strategy expects a hedging account.             |
+//+------------------------------------------------------------------+
+#property copyright "2023, lengockhanhhai - MQL5 conversion"
+#property link      "lengockhanhhai@gmail.com"
+#property version   "2.00"
+#property description "Native MQL5 conversion of the supplied Euro Scalper NDD EA"
+#property description "Preserves legacy grid/averaging logic and fixes conversion-critical defects."
+
+input bool Require_Hedging_Account = true;
+
+//+------------------------------------------------------------------+
+//| MT4 compatibility helpers used by the converted Euro Scalper EA |
+//| Native MQL5 trade/position/history implementation                |
+//+------------------------------------------------------------------+
+
+#define LEGACY_OP_BUY       0
+#define LEGACY_OP_SELL      1
+#define LEGACY_OP_BUYLIMIT  2
+#define LEGACY_OP_SELLLIMIT 3
+#define LEGACY_OP_BUYSTOP   4
+#define LEGACY_OP_SELLSTOP  5
+
+#define LEGACY_MODE_POINT      11
+#define LEGACY_MODE_DIGITS     12
+#define LEGACY_MODE_SPREAD     13
+#define LEGACY_MODE_STOPLEVEL  14
+#define LEGACY_MODE_BID         9
+#define LEGACY_MODE_ASK        10
+
+enum LegacySelectionKind
+{
+   LEGACY_SELECTION_NONE=0,
+   LEGACY_SELECTION_POSITION,
+   LEGACY_SELECTION_PENDING,
+   LEGACY_SELECTION_HISTORY_DEAL
+};
+
+LegacySelectionKind gLegacySelection=LEGACY_SELECTION_NONE;
+ulong  gLegacySelectedTicket=0;
+int    gLegacyLastError=0;
+ulong  gLegacyHistoryDeals[];
+
+double   gBid=0.0;
+double   gAsk=0.0;
+double   gClose[1];
+datetime gTime[1];
+long     gVolume[1];
+int      gBars=0;
+int      gLegacyOpenHour=0;
+int      gLegacyCloseHour=23;
+
+int LegacyGetLastError()
+{
+   int err=gLegacyLastError;
+   gLegacyLastError=0;
+   return err;
+}
+
+void LegacySetError(const int err)
+{
+   gLegacyLastError=err;
+}
+
+int LegacyMapTradeRetcode(const uint retcode)
+{
+   switch(retcode)
+   {
+      case TRADE_RETCODE_DONE:
+      case TRADE_RETCODE_DONE_PARTIAL:
+      case TRADE_RETCODE_PLACED:
+         return 0;
+      case TRADE_RETCODE_NO_MONEY:
+         return 134; // MT4 ERR_NOT_ENOUGH_MONEY
+      case TRADE_RETCODE_REQUOTE:
+      case TRADE_RETCODE_PRICE_CHANGED:
+      case TRADE_RETCODE_PRICE_OFF:
+         return 136; // MT4 off-quotes/requote-style retry bucket
+      case TRADE_RETCODE_LOCKED:
+         return 146; // MT4 trade context busy-style retry bucket
+      case TRADE_RETCODE_TIMEOUT:
+      case TRADE_RETCODE_CONNECTION:
+      case TRADE_RETCODE_TOO_MANY_REQUESTS:
+         return 4;   // MT4 server busy-style retry bucket
+      default:
+         return (int)retcode;
+   }
+}
+
+bool LegacyTradeRetcodeOK(const uint retcode)
+{
+   return (retcode==TRADE_RETCODE_DONE ||
+           retcode==TRADE_RETCODE_DONE_PARTIAL ||
+           retcode==TRADE_RETCODE_PLACED);
+}
+
+ENUM_ORDER_TYPE_FILLING LegacyFillingMode(const string symbol)
+{
+   long filling=0;
+   long execution=0;
+   SymbolInfoInteger(symbol,SYMBOL_FILLING_MODE,filling);
+   SymbolInfoInteger(symbol,SYMBOL_TRADE_EXEMODE,execution);
+
+   if((filling & SYMBOL_FILLING_FOK)==SYMBOL_FILLING_FOK)
+      return ORDER_FILLING_FOK;
+   if((filling & SYMBOL_FILLING_IOC)==SYMBOL_FILLING_IOC)
+      return ORDER_FILLING_IOC;
+
+   // RETURN is permitted for non-Market execution even when FOK/IOC flags are absent.
+   if((ENUM_SYMBOL_TRADE_EXECUTION)execution!=SYMBOL_TRADE_EXECUTION_MARKET)
+      return ORDER_FILLING_RETURN;
+
+   // Market execution should advertise FOK or IOC. Keep a deterministic fallback.
+   return ORDER_FILLING_FOK;
+}
+
+int LegacyVolumeDigits(const string symbol)
+{
+   double step=SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP);
+   if(step<=0.0) return 2;
+   int d=0;
+   while(d<8 && MathAbs(step-NormalizeDouble(step,d))>1e-12) d++;
+   return d;
+}
+
+double LegacyNormalizeVolume(const string symbol,const double volume)
+{
+   double vmin=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MIN);
+   double vmax=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MAX);
+   double step=SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP);
+   if(step<=0.0) step=(vmin>0.0 ? vmin : 0.01);
+   if(volume<=0.0) return 0.0;
+
+   double v=volume;
+   if(vmin>0.0 && v<vmin) v=vmin;
+   if(vmax>0.0 && v>vmax) v=vmax;
+   v=MathFloor((v+1e-12)/step)*step;
+   return NormalizeDouble(v,LegacyVolumeDigits(symbol));
+}
+
+double LegacyNormalizePrice(const string symbol,const double price)
+{
+   if(price==0.0) return 0.0;
+   int digits=(int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);
+   return NormalizeDouble(price,digits);
+}
+
+bool LegacyRefreshRates()
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))
+   {
+      LegacySetError((int)GetLastError());
+      return false;
+   }
+   gBid=tick.bid;
+   gAsk=tick.ask;
+   gTime[0]=iTime(_Symbol,_Period,0);
+   gClose[0]=iClose(_Symbol,_Period,0);
+   gVolume[0]=(long)iVolume(_Symbol,_Period,0);
+   gBars=Bars(_Symbol,_Period);
+   return true;
+}
+
+int LegacyTimeHour(const datetime value)
+{
+   MqlDateTime dt={};
+   if(!TimeToStruct(value,dt)) return 0;
+   return dt.hour;
+}
+
+int LegacyTimeDayOfYear(const datetime value)
+{
+   MqlDateTime dt={};
+   if(!TimeToStruct(value,dt)) return 0;
+   return dt.day_of_year;
+}
+
+int LegacyHour()
+{
+   return LegacyTimeHour(TimeCurrent());
+}
+
+int LegacyDayOfYear()
+{
+   return LegacyTimeDayOfYear(TimeCurrent());
+}
+
+int LegacyDayOfWeek()
+{
+   MqlDateTime dt={};
+   if(!TimeToStruct(TimeCurrent(),dt)) return 0;
+   return dt.day_of_week;
+}
+
+ENUM_TIMEFRAMES LegacyTimeframe(const int timeframe)
+{
+   if(timeframe==0) return _Period;
+   switch(timeframe)
+   {
+      case 1:     return PERIOD_M1;
+      case 2:     return PERIOD_M2;
+      case 3:     return PERIOD_M3;
+      case 4:     return PERIOD_M4;
+      case 5:     return PERIOD_M5;
+      case 6:     return PERIOD_M6;
+      case 10:    return PERIOD_M10;
+      case 12:    return PERIOD_M12;
+      case 15:    return PERIOD_M15;
+      case 20:    return PERIOD_M20;
+      case 30:    return PERIOD_M30;
+      case 60:    return PERIOD_H1;
+      case 120:   return PERIOD_H2;
+      case 180:   return PERIOD_H3;
+      case 240:   return PERIOD_H4;
+      case 360:   return PERIOD_H6;
+      case 480:   return PERIOD_H8;
+      case 720:   return PERIOD_H12;
+      case 1440:  return PERIOD_D1;
+      case 10080: return PERIOD_W1;
+      case 43200: return PERIOD_MN1;
+   }
+   // Already an MQL5 ENUM_TIMEFRAMES value (for example _Period).
+   return (ENUM_TIMEFRAMES)timeframe;
+}
+
+datetime LegacyITime(const string symbol,const int timeframe,const int shift)
+{
+   string s=(symbol==NULL || symbol=="" ? _Symbol : symbol);
+   return iTime(s,LegacyTimeframe(timeframe),shift);
+}
+
+double LegacyIOpen(const string symbol,const int timeframe,const int shift)
+{
+   string s=(symbol==NULL || symbol=="" ? _Symbol : symbol);
+   return iOpen(s,LegacyTimeframe(timeframe),shift);
+}
+
+double LegacyIClose(const string symbol,const int timeframe,const int shift)
+{
+   string s=(symbol==NULL || symbol=="" ? _Symbol : symbol);
+   return iClose(s,LegacyTimeframe(timeframe),shift);
+}
+
+double LegacyMarketInfo(const string symbol,const int mode)
+{
+   string s=(symbol==NULL || symbol=="" ? _Symbol : symbol);
+   MqlTick tick;
+   switch(mode)
+   {
+      case LEGACY_MODE_POINT:     return SymbolInfoDouble(s,SYMBOL_POINT);
+      case LEGACY_MODE_DIGITS:    return (double)SymbolInfoInteger(s,SYMBOL_DIGITS);
+      case LEGACY_MODE_SPREAD:    return (double)SymbolInfoInteger(s,SYMBOL_SPREAD);
+      case LEGACY_MODE_STOPLEVEL: return (double)SymbolInfoInteger(s,SYMBOL_TRADE_STOPS_LEVEL);
+      case LEGACY_MODE_BID:
+         if(SymbolInfoTick(s,tick)) return tick.bid;
+         return 0.0;
+      case LEGACY_MODE_ASK:
+         if(SymbolInfoTick(s,tick)) return tick.ask;
+         return 0.0;
+   }
+   return 0.0;
+}
+
+double LegacyAccountBalance()    { return AccountInfoDouble(ACCOUNT_BALANCE); }
+double LegacyAccountEquity()     { return AccountInfoDouble(ACCOUNT_EQUITY); }
+double LegacyAccountFreeMargin() { return AccountInfoDouble(ACCOUNT_MARGIN_FREE); }
+double LegacyAccountMargin()     { return AccountInfoDouble(ACCOUNT_MARGIN); }
+long   LegacyAccountNumber()     { return AccountInfoInteger(ACCOUNT_LOGIN); }
+long   LegacyAccountLeverage()   { return AccountInfoInteger(ACCOUNT_LEVERAGE); }
+string LegacyAccountCurrency()   { return AccountInfoString(ACCOUNT_CURRENCY); }
+string LegacyAccountCompany()    { return AccountInfoString(ACCOUNT_COMPANY); }
+bool   LegacyIsDemo()            { return (AccountInfoInteger(ACCOUNT_TRADE_MODE)==ACCOUNT_TRADE_MODE_DEMO); }
+bool   LegacyIsTesting()         { return (bool)MQLInfoInteger(MQL_TESTER); }
+bool   LegacyIsTradeContextBusy(){ return false; }
+
+void LegacyBuildHistoryCache()
+{
+   ArrayResize(gLegacyHistoryDeals,0);
+   ResetLastError();
+   if(!HistorySelect(0,TimeCurrent()+60))
+   {
+      LegacySetError((int)GetLastError());
+      return;
+   }
+
+   int total=HistoryDealsTotal();
+   for(int i=0;i<total;i++)
+   {
+      ulong ticket=HistoryDealGetTicket(i);
+      if(ticket==0) continue;
+      long dtype=HistoryDealGetInteger(ticket,DEAL_TYPE);
+      long entry=HistoryDealGetInteger(ticket,DEAL_ENTRY);
+      if((dtype==DEAL_TYPE_BUY || dtype==DEAL_TYPE_SELL) &&
+         (entry==DEAL_ENTRY_OUT || entry==DEAL_ENTRY_OUT_BY || entry==DEAL_ENTRY_INOUT))
+      {
+         int n=ArraySize(gLegacyHistoryDeals);
+         ArrayResize(gLegacyHistoryDeals,n+1);
+         gLegacyHistoryDeals[n]=ticket;
+      }
+   }
+   LegacySetError(0);
+}
+
+int LegacyHistoryTotal()
+{
+   LegacyBuildHistoryCache();
+   return ArraySize(gLegacyHistoryDeals);
+}
+
+int LegacyOrdersTotal()
+{
+   return PositionsTotal()+OrdersTotal();
+}
+
+bool LegacyOrderSelect(const int index,const int select_mode,const int pool)
+{
+   gLegacySelection=LEGACY_SELECTION_NONE;
+   gLegacySelectedTicket=0;
+
+   if(select_mode!=0)
+   {
+      LegacySetError(4108);
+      return false;
+   }
+
+   if(pool==1)
+   {
+      int n=ArraySize(gLegacyHistoryDeals);
+      if(index<0 || index>=n)
+      {
+         LegacySetError(4108);
+         return false;
+      }
+      ulong deal=gLegacyHistoryDeals[index];
+      if(deal==0 || !HistoryDealSelect(deal))
+      {
+         LegacySetError((int)GetLastError());
+         return false;
+      }
+      gLegacySelection=LEGACY_SELECTION_HISTORY_DEAL;
+      gLegacySelectedTicket=deal;
+      LegacySetError(0);
+      return true;
+   }
+
+   int ptotal=PositionsTotal();
+   if(index>=0 && index<ptotal)
+   {
+      ulong ticket=PositionGetTicket(index);
+      if(ticket==0 || !PositionSelectByTicket(ticket))
+      {
+         LegacySetError((int)GetLastError());
+         return false;
+      }
+      gLegacySelection=LEGACY_SELECTION_POSITION;
+      gLegacySelectedTicket=ticket;
+      LegacySetError(0);
+      return true;
+   }
+
+   int oindex=index-ptotal;
+   if(oindex>=0 && oindex<OrdersTotal())
+   {
+      ulong ticket=OrderGetTicket(oindex);
+      if(ticket==0 || !OrderSelect(ticket))
+      {
+         LegacySetError((int)GetLastError());
+         return false;
+      }
+      gLegacySelection=LEGACY_SELECTION_PENDING;
+      gLegacySelectedTicket=ticket;
+      LegacySetError(0);
+      return true;
+   }
+
+   LegacySetError(4108);
+   return false;
+}
+
+string LegacyOrderSymbol()
+{
+   if(gLegacySelection==LEGACY_SELECTION_POSITION)
+      return PositionGetString(POSITION_SYMBOL);
+   if(gLegacySelection==LEGACY_SELECTION_PENDING)
+      return OrderGetString(ORDER_SYMBOL);
+   if(gLegacySelection==LEGACY_SELECTION_HISTORY_DEAL)
+      return HistoryDealGetString(gLegacySelectedTicket,DEAL_SYMBOL);
+   return "";
+}
+
+long LegacyOrderMagicNumber()
+{
+   if(gLegacySelection==LEGACY_SELECTION_POSITION)
+      return PositionGetInteger(POSITION_MAGIC);
+   if(gLegacySelection==LEGACY_SELECTION_PENDING)
+      return OrderGetInteger(ORDER_MAGIC);
+   if(gLegacySelection==LEGACY_SELECTION_HISTORY_DEAL)
+      return HistoryDealGetInteger(gLegacySelectedTicket,DEAL_MAGIC);
+   return 0;
+}
+
+int LegacyOrderType()
+{
+   if(gLegacySelection==LEGACY_SELECTION_POSITION)
+   {
+      long t=PositionGetInteger(POSITION_TYPE);
+      return (t==POSITION_TYPE_BUY ? LEGACY_OP_BUY : LEGACY_OP_SELL);
+   }
+   if(gLegacySelection==LEGACY_SELECTION_PENDING)
+   {
+      long t=OrderGetInteger(ORDER_TYPE);
+      if(t==ORDER_TYPE_BUY_LIMIT)  return LEGACY_OP_BUYLIMIT;
+      if(t==ORDER_TYPE_SELL_LIMIT) return LEGACY_OP_SELLLIMIT;
+      if(t==ORDER_TYPE_BUY_STOP || t==ORDER_TYPE_BUY_STOP_LIMIT) return LEGACY_OP_BUYSTOP;
+      if(t==ORDER_TYPE_SELL_STOP || t==ORDER_TYPE_SELL_STOP_LIMIT) return LEGACY_OP_SELLSTOP;
+      return -1;
+   }
+   if(gLegacySelection==LEGACY_SELECTION_HISTORY_DEAL)
+   {
+      long t=HistoryDealGetInteger(gLegacySelectedTicket,DEAL_TYPE);
+      return (t==DEAL_TYPE_BUY ? LEGACY_OP_BUY : (t==DEAL_TYPE_SELL ? LEGACY_OP_SELL : -1));
+   }
+   return -1;
+}
+
+long LegacyOrderTicket()
+{
+   return (long)gLegacySelectedTicket;
+}
+
+double LegacyOrderLots()
+{
+   if(gLegacySelection==LEGACY_SELECTION_POSITION)
+      return PositionGetDouble(POSITION_VOLUME);
+   if(gLegacySelection==LEGACY_SELECTION_PENDING)
+      return OrderGetDouble(ORDER_VOLUME_CURRENT);
+   if(gLegacySelection==LEGACY_SELECTION_HISTORY_DEAL)
+      return HistoryDealGetDouble(gLegacySelectedTicket,DEAL_VOLUME);
+   return 0.0;
+}
+
+double LegacyOrderOpenPrice()
+{
+   if(gLegacySelection==LEGACY_SELECTION_POSITION)
+      return PositionGetDouble(POSITION_PRICE_OPEN);
+   if(gLegacySelection==LEGACY_SELECTION_PENDING)
+      return OrderGetDouble(ORDER_PRICE_OPEN);
+   if(gLegacySelection==LEGACY_SELECTION_HISTORY_DEAL)
+      return HistoryDealGetDouble(gLegacySelectedTicket,DEAL_PRICE);
+   return 0.0;
+}
+
+double LegacyOrderStopLoss()
+{
+   if(gLegacySelection==LEGACY_SELECTION_POSITION)
+      return PositionGetDouble(POSITION_SL);
+   if(gLegacySelection==LEGACY_SELECTION_PENDING)
+      return OrderGetDouble(ORDER_SL);
+   return 0.0;
+}
+
+double LegacyOrderTakeProfit()
+{
+   if(gLegacySelection==LEGACY_SELECTION_POSITION)
+      return PositionGetDouble(POSITION_TP);
+   if(gLegacySelection==LEGACY_SELECTION_PENDING)
+      return OrderGetDouble(ORDER_TP);
+   return 0.0;
+}
+
+double LegacyOrderProfit()
+{
+   if(gLegacySelection==LEGACY_SELECTION_POSITION)
+      return PositionGetDouble(POSITION_PROFIT);
+   if(gLegacySelection==LEGACY_SELECTION_HISTORY_DEAL)
+      return HistoryDealGetDouble(gLegacySelectedTicket,DEAL_PROFIT);
+   return 0.0;
+}
+
+double LegacyOrderCommission()
+{
+   if(gLegacySelection==LEGACY_SELECTION_HISTORY_DEAL)
+      return HistoryDealGetDouble(gLegacySelectedTicket,DEAL_COMMISSION)+HistoryDealGetDouble(gLegacySelectedTicket,DEAL_FEE);
+   return 0.0;
+}
+
+double LegacyOrderSwap()
+{
+   if(gLegacySelection==LEGACY_SELECTION_POSITION)
+      return PositionGetDouble(POSITION_SWAP);
+   if(gLegacySelection==LEGACY_SELECTION_HISTORY_DEAL)
+      return HistoryDealGetDouble(gLegacySelectedTicket,DEAL_SWAP);
+   return 0.0;
+}
+
+datetime LegacyOrderCloseTime()
+{
+   if(gLegacySelection==LEGACY_SELECTION_HISTORY_DEAL)
+      return (datetime)HistoryDealGetInteger(gLegacySelectedTicket,DEAL_TIME);
+   return 0;
+}
+
+bool LegacyOrderClose(const long ticket,const double volume,const double ignored_price,const int slippage,const long ignored_color)
+{
+   ulong position_ticket=(ulong)ticket;
+   if(!PositionSelectByTicket(position_ticket))
+   {
+      LegacySetError(4108);
+      return false;
+   }
+
+   string symbol=PositionGetString(POSITION_SYMBOL);
+   long ptype=PositionGetInteger(POSITION_TYPE);
+   double current_volume=PositionGetDouble(POSITION_VOLUME);
+   double close_volume=LegacyNormalizeVolume(symbol,MathMin(volume,current_volume));
+   if(close_volume<=0.0)
+   {
+      LegacySetError(131);
+      return false;
+   }
+
+   MqlTick tick;
+   if(!SymbolInfoTick(symbol,tick))
+   {
+      LegacySetError((int)GetLastError());
+      return false;
+   }
+
+   long execution_mode=0;
+   SymbolInfoInteger(symbol,SYMBOL_TRADE_EXEMODE,execution_mode);
+
+   MqlTradeRequest request={};
+   MqlTradeResult  result={};
+   request.action=TRADE_ACTION_DEAL;
+   request.position=position_ticket;
+   request.symbol=symbol;
+   request.volume=close_volume;
+   request.magic=(ulong)PositionGetInteger(POSITION_MAGIC);
+   request.deviation=(slippage>0 ? (ulong)slippage : 0);
+   request.type_filling=LegacyFillingMode(symbol);
+   request.type_time=ORDER_TIME_GTC;
+   if(ptype==POSITION_TYPE_BUY)
+   {
+      request.type=ORDER_TYPE_SELL;
+      request.price=((ENUM_SYMBOL_TRADE_EXECUTION)execution_mode==SYMBOL_TRADE_EXECUTION_MARKET ? 0.0 : tick.bid);
+   }
+   else
+   {
+      request.type=ORDER_TYPE_BUY;
+      request.price=((ENUM_SYMBOL_TRADE_EXECUTION)execution_mode==SYMBOL_TRADE_EXECUTION_MARKET ? 0.0 : tick.ask);
+   }
+
+   ResetLastError();
+   bool sent=OrderSend(request,result);
+   if(!sent || !LegacyTradeRetcodeOK(result.retcode))
+   {
+      LegacySetError(sent ? LegacyMapTradeRetcode(result.retcode) : (int)GetLastError());
+      PrintFormat("LegacyOrderClose failed. ticket=%I64d retcode=%u comment=%s",ticket,result.retcode,result.comment);
+      return false;
+   }
+   LegacySetError(0);
+   return true;
+}
+
+bool LegacyOrderModify(const long ticket,const double price,const double sl,const double tp,const datetime expiration,const long ignored_color)
+{
+   ulong t=(ulong)ticket;
+   if(PositionSelectByTicket(t))
+   {
+      string symbol=PositionGetString(POSITION_SYMBOL);
+      MqlTradeRequest request={};
+      MqlTradeResult  result={};
+      request.action=TRADE_ACTION_SLTP;
+      request.position=t;
+      request.symbol=symbol;
+      request.magic=(ulong)PositionGetInteger(POSITION_MAGIC);
+      request.sl=LegacyNormalizePrice(symbol,sl);
+      request.tp=LegacyNormalizePrice(symbol,tp);
+
+      ResetLastError();
+      bool sent=OrderSend(request,result);
+      if(!sent || !LegacyTradeRetcodeOK(result.retcode))
+      {
+         LegacySetError(sent ? LegacyMapTradeRetcode(result.retcode) : (int)GetLastError());
+         PrintFormat("LegacyOrderModify(position) failed. ticket=%I64d retcode=%u comment=%s",ticket,result.retcode,result.comment);
+         return false;
+      }
+      LegacySetError(0);
+      return true;
+   }
+
+   if(OrderSelect(t))
+   {
+      string symbol=OrderGetString(ORDER_SYMBOL);
+      MqlTradeRequest request={};
+      MqlTradeResult  result={};
+      request.action=TRADE_ACTION_MODIFY;
+      request.order=t;
+      request.symbol=symbol;
+      request.price=LegacyNormalizePrice(symbol,price);
+      request.sl=LegacyNormalizePrice(symbol,sl);
+      request.tp=LegacyNormalizePrice(symbol,tp);
+      request.type_time=(ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TYPE_TIME);
+      if(expiration>0)
+      {
+         request.type_time=ORDER_TIME_SPECIFIED;
+         request.expiration=expiration;
+      }
+
+      ResetLastError();
+      bool sent=OrderSend(request,result);
+      if(!sent || !LegacyTradeRetcodeOK(result.retcode))
+      {
+         LegacySetError(sent ? LegacyMapTradeRetcode(result.retcode) : (int)GetLastError());
+         PrintFormat("LegacyOrderModify(pending) failed. ticket=%I64d retcode=%u comment=%s",ticket,result.retcode,result.comment);
+         return false;
+      }
+      LegacySetError(0);
+      return true;
+   }
+
+   LegacySetError(4108);
+   return false;
+}
+
+int LegacyOrderSend(const string symbol,const int cmd,const double volume,const double price,const int slippage,const double sl,const double tp,const string comment,const long magic,const datetime expiration,const long ignored_color)
+{
+   string s=(symbol==NULL || symbol=="" ? _Symbol : symbol);
+   double v=LegacyNormalizeVolume(s,volume);
+   if(v<=0.0)
+   {
+      LegacySetError(131);
+      return -1;
+   }
+
+   MqlTick tick;
+   if(!SymbolInfoTick(s,tick))
+   {
+      LegacySetError((int)GetLastError());
+      return -1;
+   }
+
+   long execution_mode=0;
+   SymbolInfoInteger(s,SYMBOL_TRADE_EXEMODE,execution_mode);
+
+   MqlTradeRequest request={};
+   MqlTradeResult  result={};
+   request.symbol=s;
+   request.volume=v;
+   request.magic=(magic>0 ? (ulong)magic : 0);
+   request.deviation=(slippage>0 ? (ulong)slippage : 0);
+   request.comment=comment;
+   request.sl=LegacyNormalizePrice(s,sl);
+   request.tp=LegacyNormalizePrice(s,tp);
+
+   switch(cmd)
+   {
+      case LEGACY_OP_BUY:
+         request.action=TRADE_ACTION_DEAL;
+         request.type=ORDER_TYPE_BUY;
+         request.price=((ENUM_SYMBOL_TRADE_EXECUTION)execution_mode==SYMBOL_TRADE_EXECUTION_MARKET ? 0.0 : tick.ask);
+         request.type_filling=LegacyFillingMode(s);
+         request.type_time=ORDER_TIME_GTC;
+         break;
+      case LEGACY_OP_SELL:
+         request.action=TRADE_ACTION_DEAL;
+         request.type=ORDER_TYPE_SELL;
+         request.price=((ENUM_SYMBOL_TRADE_EXECUTION)execution_mode==SYMBOL_TRADE_EXECUTION_MARKET ? 0.0 : tick.bid);
+         request.type_filling=LegacyFillingMode(s);
+         request.type_time=ORDER_TIME_GTC;
+         break;
+      case LEGACY_OP_BUYLIMIT:
+         request.action=TRADE_ACTION_PENDING;
+         request.type=ORDER_TYPE_BUY_LIMIT;
+         request.price=LegacyNormalizePrice(s,price);
+         request.type_filling=ORDER_FILLING_RETURN;
+         request.type_time=(expiration>0 ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC);
+         request.expiration=expiration;
+         break;
+      case LEGACY_OP_SELLLIMIT:
+         request.action=TRADE_ACTION_PENDING;
+         request.type=ORDER_TYPE_SELL_LIMIT;
+         request.price=LegacyNormalizePrice(s,price);
+         request.type_filling=ORDER_FILLING_RETURN;
+         request.type_time=(expiration>0 ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC);
+         request.expiration=expiration;
+         break;
+      case LEGACY_OP_BUYSTOP:
+         request.action=TRADE_ACTION_PENDING;
+         request.type=ORDER_TYPE_BUY_STOP;
+         request.price=LegacyNormalizePrice(s,price);
+         request.type_filling=ORDER_FILLING_RETURN;
+         request.type_time=(expiration>0 ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC);
+         request.expiration=expiration;
+         break;
+      case LEGACY_OP_SELLSTOP:
+         request.action=TRADE_ACTION_PENDING;
+         request.type=ORDER_TYPE_SELL_STOP;
+         request.price=LegacyNormalizePrice(s,price);
+         request.type_filling=ORDER_FILLING_RETURN;
+         request.type_time=(expiration>0 ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC);
+         request.expiration=expiration;
+         break;
+      default:
+         LegacySetError(3);
+         return -1;
+   }
+
+   ResetLastError();
+   bool sent=OrderSend(request,result);
+   if(!sent || !LegacyTradeRetcodeOK(result.retcode))
+   {
+      LegacySetError(sent ? LegacyMapTradeRetcode(result.retcode) : (int)GetLastError());
+      PrintFormat("LegacyOrderSend failed. cmd=%d volume=%.4f retcode=%u comment=%s",cmd,v,result.retcode,result.comment);
+      return -1;
+   }
+
+   LegacySetError(0);
+   // The legacy caller only tests positive/negative; scanning obtains the actual ticket.
+   return 1;
+}
+
+int LegacyObjectsTotal(const int subwindow)
+{
+   return ObjectsTotal(0,subwindow,-1);
+}
+
+string LegacyObjectName(const int index)
+{
+   return ObjectName(0,index,-1,-1);
+}
+
+double LegacyObjectGet(const string name,const int property)
+{
+   if(property==OBJPROP_TIME)
+      return (double)ObjectGetInteger(0,name,OBJPROP_TIME,0);
+   return 0.0;
+}
+
+bool LegacyObjectDelete(const string name)
+{
+   return ObjectDelete(0,name);
+}
+
+bool LegacyObjectSet(const string name,const int property,const long value)
+{
+   if(property==OBJPROP_XDISTANCE)
+      return ObjectSetInteger(0,name,OBJPROP_XDISTANCE,value);
+   if(property==OBJPROP_YDISTANCE)
+      return ObjectSetInteger(0,name,OBJPROP_YDISTANCE,value);
+   if(property==OBJPROP_CORNER)
+   {
+      long corner=value;
+      if(corner<0 || corner>3) corner=0;
+      return ObjectSetInteger(0,name,OBJPROP_CORNER,corner);
+   }
+   return false;
+}
+
+bool LegacyObjectSetText(const string name,const string text,const int font_size,const string font_name,const long clr_value)
+{
+   bool ok=true;
+   ok &= ObjectSetString(0,name,OBJPROP_TEXT,text);
+   ok &= ObjectSetString(0,name,OBJPROP_FONT,font_name);
+   ok &= ObjectSetInteger(0,name,OBJPROP_FONTSIZE,font_size);
+   ok &= ObjectSetInteger(0,name,OBJPROP_COLOR,(color)(uint)clr_value);
+   return ok;
+}
+
+//+------------------------------------------------------------------+
+//| Converted legacy strategy body                                  |
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//|                                                      
+//|                                      Copyright 2023, lengockhanhhai|
+//|                                       lengockhanhhai@gmail.com|
+//+------------------------------------------------------------------+
+
+input string Minimal_Deposit = "$200";
+input string Time_Frame = "Time Frame M1";
+input string Pairs = "EurUsd";
+input bool Use_Daily_Target = true;
+input double Daily_Target = 100;
+input bool Hidden_TP = true;
+input double Hiden_TP = 500;
+input double Lot = 0.01;
+input double LotMultiplikator = 1.21;
+input double TakeProfit = 34;
+input double Step = 21;
+input double Averaging = 1;
+input int MaxTrades = 31;
+input bool UseEquityStop = false;
+input double TotalEquityRisk = 20;
+input int Open_Hour = 0;
+input int Close_Hour = 23;
+input bool TradeOnThursday = true;
+input int Thursday_Hour = 12;
+input bool TradeOnFriday = true;
+input int Friday_Hour = 20;
+input bool Filter_Sideway = true; // Retained from source; original code contains no active implementation.
+input bool Filter_News = true;    // Retained from source; original code contains no active implementation.
+input bool invisible_mode = true; // Retained from source; original code contains no active implementation.
+input double OpenRangePips = 1;
+input double MaxDailyRange = 20000;
+
+string I_s_0;
+int I_i_0;
+double I_d_0;
+double I_d_1;
+int I_i_1;
+double G_d_2;
+int G_i_2;
+int G_i_3;
+double G_d_3;
+int G_i_4;
+int G_i_5;
+int G_i_6;
+int G_i_7;
+int G_i_8;
+int G_i_9;
+int G_i_10;
+int G_i_11;
+int G_i_12;
+int G_i_13;
+int G_i_14;
+int G_i_15;
+double G_d_4;
+int G_i_16;
+int G_i_17;
+int G_i_18;
+int G_i_19;
+int G_i_20;
+double G_d_5;
+long G_i_21;
+long G_i_22;
+int G_i_23;
+double G_d_6;
+long G_i_24;
+long G_i_25;
+int G_i_26;
+double G_d_7;
+long G_i_27;
+long G_i_28;
+int G_i_29;
+double G_d_8;
+long G_i_30;
+long G_i_31;
+int G_i_32;
+double G_d_9;
+double G_d_10;
+int G_i_33;
+int G_i_34;
+double G_d_11;
+long G_i_35;
+long G_i_36;
+int G_i_37;
+double G_d_12;
+double G_d_13;
+int G_i_38;
+int G_i_39;
+double G_d_14;
+long G_i_40;
+long G_i_41;
+int G_i_42;
+double G_d_15;
+int G_i_43;
+int G_i_44;
+double G_d_16;
+int G_i_45;
+int G_i_46;
+bool G_b_0;
+double G_d_17;
+double G_d_18;
+int G_i_47;
+int G_i_48;
+double G_d_19;
+long G_i_49;
+long G_i_50;
+int G_i_51;
+double G_d_20;
+double G_d_21;
+int G_i_52;
+int G_i_53;
+double G_d_22;
+long G_i_54;
+long G_i_55;
+int G_i_56;
+bool G_b_1;
+double G_d_23;
+double G_d_24;
+int G_i_57;
+int G_i_58;
+double G_d_25;
+long G_i_59;
+long G_i_60;
+int G_i_61;
+double G_d_26;
+double G_d_27;
+int G_i_62;
+int G_i_63;
+double G_d_28;
+long G_i_64;
+long G_i_65;
+int G_i_66;
+int G_i_67;
+int G_i_68;
+bool I_b_2;
+bool G_b_3;
+double G_d_29;
+double I_d_30;
+double G_d_31;
+double I_d_32;
+bool G_b_4;
+string I_s_1;
+bool I_b_5;
+double G_d_33;
+long G_l_1;
+long I_l_2;
+int G_i_70;
+bool I_b_7;
+int I_i_71;
+double I_d_34;
+int G_i_73;
+int G_i_75;
+bool G_b_9;
+double I_d_43;
+bool I_b_10;
+double I_d_44;
+int I_i_76;
+int I_i_77;
+double I_d_45;
+double I_d_46;
+double I_d_47;
+bool I_b_11;
+int I_i_78;
+int I_i_79;
+bool I_b_12;
+double I_d_48;
+double I_d_49;
+double I_d_50;
+bool I_b_13;
+long G_l_3;
+long G_l_4;
+int I_i_80;
+int G_i_81;
+int I_i_84;
+double G_d_55;
+double G_d_56;
+int G_i_85;
+double I_d_57;
+double I_d_58;
+int G_i_87;
+bool I_b_16;
+int I_i_88;
+bool I_b_17;
+bool I_b_18;
+bool I_b_19;
+double I_d_63;
+double I_d_64;
+bool I_b_20;
+double G_d_65;
+bool I_b_22;
+double I_d_66;
+int G_i_89;
+bool I_b_23;
+double I_d_67;
+double I_d_69;
+bool I_b_24;
+int I_i_90;
+string I_s_2;
+int G_i_91;
+int I_i_92;
+double G_d_70;
+int G_i_93;
+int G_i_97;
+double I_d_74;
+double I_d_75;
+int I_i_98;
+int G_i_99;
+long G_l_5;
+double I_d_76;
+double G_d_77;
+int G_i_100;
+double G_d_78;
+double I_d_79;
+double I_d_80;
+double I_d_81;
+double I_d_82;
+double I_d_83;
+double I_d_84;
+int G_i_102;
+long G_l_6;
+long G_l_7;
+int G_i_105;
+int G_i_106;
+long G_l_8;
+long G_l_9;
+int G_i_110;
+int G_i_111;
+int G_i_112;
+long G_l_10;
+long G_l_11;
+int G_i_115;
+long G_l_12;
+long G_l_13;
+int G_i_119;
+long G_l_14;
+long G_l_15;
+int G_i_124;
+long G_l_16;
+long G_l_17;
+double G_d_104;
+double I_d_105;
+string I_s_3;
+int I_i_129;
+string I_s_4;
+string I_s_5;
+string I_s_6;
+string I_s_7;
+int I_i_130;
+int I_i_131;
+int I_i_132;
+int I_i_133;
+int I_i_134;
+int I_i_135;
+int I_i_136;
+int I_i_137;
+bool I_b_43;
+string I_s_8;
+string I_s_9;
+double G_d_106;
+double G_d_108;
+long G_l_20;
+long G_l_21;
+long G_l_22;
+long G_l_23;
+double G_d_109;
+double G_d_110;
+double G_d_111;
+double G_d_112;
+double G_d_113;
+double G_d_114;
+double G_d_115;
+double G_d_116;
+double G_d_117;
+double G_d_118;
+double G_d_119;
+double G_d_120;
+int G_i_139;
+double G_d_121;
+double G_d_122;
+double G_d_123;
+double G_d_124;
+bool G_b_44;
+double G_d_125;
+double G_d_126;
+bool G_b_45;
+int G_i_143;
+bool G_b_46;
+bool G_b_47;
+double G_d_127;
+double G_d_128;
+int G_i_146;
+bool G_b_48;
+double returned_double;
+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+int LegacyInit() {
+   I_s_2 = "Euro Scalper";
+   I_d_67 = 2;
+   I_s_3 = "Euro Scalper";
+   I_i_129 = 1;
+   I_s_4 = " MARTIN 1 - on. 2 - off.";
+   I_i_98 = 1;
+   I_b_24 = true;
+   I_d_45 = 0;
+   I_d_34 = 5;
+   I_s_5 = "true = Fixed Lot, false = Account Balance";
+   I_b_10 = true;
+   I_d_105 = 30;
+   I_d_44 = 0;
+   I_d_30 = 0;
+   I_i_77 = 1;
+   I_d_46 = 0;
+   I_d_82 = 0;
+   I_d_50 = 10;
+   I_d_49 = 10;
+   I_d_47 = 0;
+   I_s_6 = "汤X Number of trades 29 max 27 2x";
+   I_s_7 = "Stop Loss";
+   I_b_23 = false;
+   I_b_12 = false;
+   I_b_13 = false;
+   I_d_76 = 48;
+   I_b_11 = false;
+   I_i_79 = 2;
+   I_i_78 = 16;
+   I_i_0 = 1111111;
+   I_i_71 = 0;
+   I_b_20 = true;
+   I_d_43 = 0;
+   I_d_80 = 0;
+   I_d_66 = 0;
+   I_d_81 = 0;
+   I_d_84 = 0;
+   I_d_48 = 0;
+   I_d_74 = 0;
+   I_d_75 = 0;
+   I_d_63 = 0;
+   I_d_64 = 0;
+   I_d_1 = 0;
+   I_b_17 = false;
+   I_i_130 = 0;
+   I_i_80 = 0;
+   I_i_90 = 0;
+   I_d_69 = 0;
+   I_i_84 = 0;
+   I_i_88 = 0;
+   I_d_83 = 0;
+   I_b_22 = false;
+   I_b_18 = false;
+   I_b_19 = false;
+   I_i_92 = 0;
+   I_b_16 = false;
+   I_i_131 = 0;
+   I_i_132 = 0;
+   I_d_57 = 0;
+   I_d_58 = 0;
+   I_i_133 = 14;
+   I_i_134 = 55295;
+   I_i_135 = 42495;
+   I_i_136 = 8421504;
+   I_i_137 = 5197615;
+   I_i_76 = -2;
+   I_b_7 = false;
+   I_b_5 = false;
+   I_b_43 = true;
+   I_s_9 = "ACCOUNT ANDA BELUM TERDAFTAR! UNTUK DIPAKAI DI LIVE ACCOUNT,HUBUNGI https://www.facebook.com/septi.fx.profit";
+   int L_i_15;
+   L_i_15 = 0;
+   I_s_0 = "Daftar account,358795,3720446,71328690,3710974,64513290,71417917,71328956,71423205,,,";
+   if (_Symbol == "AUDCADm" || _Symbol == "AUDCAD") {
+      I_i_0 = 101101;
+   }
+   if (_Symbol == "AUDJPYm" || _Symbol == "AUDJPY") {
+      I_i_0 = 101102;
+   }
+   if (_Symbol == "AUDNZDm" || _Symbol == "AUDNZD") {
+      I_i_0 = 101103;
+   }
+   if (_Symbol == "AUDUSDm" || _Symbol == "AUDUSD") {
+      I_i_0 = 101104;
+   }
+   if (_Symbol == "CHFJPYm" || _Symbol == "CHFJPY") {
+      I_i_0 = 101105;
+   }
+   if (_Symbol == "EURAUDm" || _Symbol == "EURAUD") {
+      I_i_0 = 101106;
+   }
+   if (_Symbol == "EURCADm" || _Symbol == "EURCAD") {
+      I_i_0 = 101107;
+   }
+   if (_Symbol == "EURCHFm" || _Symbol == "EURCHF") {
+      I_i_0 = 101108;
+   }
+   if (_Symbol == "EURGBPm" || _Symbol == "EURGBP") {
+      I_i_0 = 101109;
+   }
+   if (_Symbol == "EURJPYm" || _Symbol == "EURJPY") {
+      I_i_0 = 101110;
+   }
+   if (_Symbol == "EURUSDm" || _Symbol == "EURUSD") {
+      I_i_0 = 101111;
+   }
+   if (_Symbol == "GBPCHFm" || _Symbol == "GBPCHF") {
+      I_i_0 = 101112;
+   }
+   if (_Symbol == "GBPJPYm" || _Symbol == "GBPJPY") {
+      I_i_0 = 101113;
+   }
+   if (_Symbol == "GBPUSDm" || _Symbol == "GBPUSD") {
+      I_i_0 = 101114;
+   }
+   if (_Symbol == "NZDJPYm" || _Symbol == "NZDJPY") {
+      I_i_0 = 101115;
+   }
+   if (_Symbol == "NZDUSDm" || _Symbol == "NZDUSD") {
+      I_i_0 = 101116;
+   }
+   if (_Symbol == "USDCHFm" || _Symbol == "USDCHF") {
+      I_i_0 = 101117;
+   }
+   if (_Symbol == "USDJPYm" || _Symbol == "USDJPY") {
+      I_i_0 = 101118;
+   }
+   if (_Symbol == "USDCADm" || _Symbol == "USDCAD") {
+      I_i_0 = 101119;
+   }
+   if (I_i_0 == 0) {
+      I_i_0 = 999999;
+   }
+   I_d_1 = (LegacyMarketInfo(_Symbol, LEGACY_MODE_SPREAD) * _Point);
+   L_i_15 = 0;
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+int LegacyStart() {
+   string S_s_20;
+   string S_s_21;
+   string S_s_22;
+   string S_s_23;
+   string S_s_14;
+   string S_s_15;
+   string S_s_16;
+   string S_s_17;
+   string S_s_18;
+   string S_s_19;
+   int L_i_15;
+   int L_i_11;
+   string L_s_0;
+   double L_d_0;
+   double L_d_1;
+   double L_d_2;
+   double L_d_3;
+   int L_i_3;
+   int L_i_4;
+   double L_d_4;
+   double L_d_5;
+   double L_d_6;
+   int L_i_5;
+   string L_s_1;
+   string L_s_2;
+   double L_d_7;
+   double L_d_8;
+   double L_d_9;
+   double L_d_10;
+   double L_d_11;
+   double L_d_12;
+   L_i_15 = 0;
+   L_i_11 = 0;
+   L_d_0 = 0;
+   L_d_1 = 0;
+   L_d_2 = 0;
+   L_d_3 = 0;
+   L_i_3 = 0;
+   L_i_4 = 0;
+   L_d_4 = 0;
+   L_d_5 = 0;
+   L_d_6 = 0;
+   L_i_5 = 0;
+   L_d_7 = 0;
+   L_d_8 = 0;
+   L_d_9 = 0;
+   L_d_10 = 0;
+   L_d_11 = 0;
+   L_d_12 = 0;
+   G_d_2 = 0;
+   G_i_2 = 0;
+   G_i_3 = 0;
+   G_d_3 = 0;
+   G_i_4 = 0;
+   G_i_5 = 0;
+   G_i_6 = 0;
+   G_i_7 = 0;
+   G_i_8 = 0;
+   G_i_9 = 0;
+   G_i_10 = 0;
+   G_i_11 = 0;
+   G_i_12 = 0;
+   G_i_13 = 0;
+   G_i_14 = 0;
+   G_i_15 = 0;
+   G_d_4 = 0;
+   G_i_16 = 0;
+   G_i_17 = 0;
+   G_i_18 = 0;
+   G_i_19 = 0;
+   G_i_20 = 0;
+   G_d_5 = 0;
+   G_i_21 = 0;
+   G_i_22 = 0;
+   G_i_23 = 0;
+   G_d_6 = 0;
+   G_i_24 = 0;
+   G_i_25 = 0;
+   G_i_26 = 0;
+   G_d_7 = 0;
+   G_i_27 = 0;
+   G_i_28 = 0;
+   G_i_29 = 0;
+   G_d_8 = 0;
+   G_i_30 = 0;
+   G_i_31 = 0;
+   G_i_32 = 0;
+   G_d_9 = 0;
+   G_d_10 = 0;
+   G_i_33 = 0;
+   G_i_34 = 0;
+   G_d_11 = 0;
+   G_i_35 = 0;
+   G_i_36 = 0;
+   G_i_37 = 0;
+   G_d_12 = 0;
+   G_d_13 = 0;
+   G_i_38 = 0;
+   G_i_39 = 0;
+   G_d_14 = 0;
+   G_i_40 = 0;
+   G_i_41 = 0;
+   G_i_42 = 0;
+   G_d_15 = 0;
+   G_i_43 = 0;
+   G_i_44 = 0;
+   G_d_16 = 0;
+   G_i_45 = 0;
+   G_i_46 = 0;
+   G_b_0 = false;
+   G_d_17 = 0;
+   G_d_18 = 0;
+   G_i_47 = 0;
+   G_i_48 = 0;
+   G_d_19 = 0;
+   G_i_49 = 0;
+   G_i_50 = 0;
+   G_i_51 = 0;
+   G_d_20 = 0;
+   G_d_21 = 0;
+   G_i_52 = 0;
+   G_i_53 = 0;
+   G_d_22 = 0;
+   G_i_54 = 0;
+   G_i_55 = 0;
+   G_i_56 = 0;
+   G_b_1 = false;
+   G_d_23 = 0;
+   G_d_24 = 0;
+   G_i_57 = 0;
+   G_i_58 = 0;
+   G_d_25 = 0;
+   G_i_59 = 0;
+   G_i_60 = 0;
+   G_i_61 = 0;
+   G_d_26 = 0;
+   G_d_27 = 0;
+   G_i_62 = 0;
+   G_i_63 = 0;
+   G_d_28 = 0;
+   G_i_64 = 0;
+   G_i_65 = 0;
+   G_i_66 = 0;
+   G_i_67 = 0;
+   G_i_68 = 0;
+   /*
+   if (LegacyIsTesting()) {
+   Alert("This EA Cannot be Backtest (Maaf ya EA tidak Bisa di Backtest wkwkwkwkw) ");
+   L_i_15 = 0;
+   return L_i_15;
+   }
+   */
+   L_i_11 = LegacyObjectsTotal(-1) - 1;
+   if (L_i_11 >= 0) {
+      do {
+         L_s_0 = LegacyObjectName(L_i_11);
+         if ((LegacyObjectGet(L_s_0, OBJPROP_TIME) > 0)) {
+            G_d_29 = LegacyObjectGet(L_s_0, OBJPROP_TIME);
+            G_d_31 = (I_d_30 * 86400);
+            if ((G_d_29 < (gTime[0] - G_d_31))) {
+               LegacyObjectDelete(L_s_0);
+            }
+         }
+         L_i_11 = L_i_11 - 1;
+      } while (L_i_11 >= 0);
+   }
+   /*
+   S_s_20 = (string)LegacyAccountNumber();
+   S_s_20 = "," + S_s_20;
+   S_s_20 = S_s_20 + ",";
+   I_s_1 = S_s_20;
+   I_i_1 = StringFind(I_s_0, I_s_1, 0);
+   if (I_i_1 == -1) {
+   I_b_5 = false;
+   }
+   else {
+   I_b_5 = true;
+   }
+
+   if (I_i_1 == 238 && LegacyIsDemo() == false) {
+   Alert("ACCOUNT ANDA BELUM TERDAFTAR!HUBUNGI https://www.facebook.com/septi.fx.profit");
+   ObjectCreate(0, "Copyright", OBJ_LABEL, 0, 0, 0, 0, 0, 0, 0);
+   LegacyObjectSet("Copyright", OBJPROP_XDISTANCE, 1);
+   LegacyObjectSet("Copyright", OBJPROP_YDISTANCE, 20);
+   LegacyObjectSetText("Copyright", "For Aktivasi EA => https://www.facebook.com/septi.fx.profit", 20, "Times New Roman", 65535);
+   L_i_15 = 0;
+   return L_i_15;
+   }
+   */
+   ObjectCreate(0, "j", OBJ_LABEL, 0, 0, 0, 0, 0, 0, 0);
+   LegacyObjectSet("j", OBJPROP_CORNER, 4);
+   LegacyObjectSet("j", OBJPROP_XDISTANCE, 4);
+   LegacyObjectSet("j", OBJPROP_YDISTANCE, 10);
+   LegacyObjectSetText("j", "Euro Scalper NDD", 19, "Times New Roman Bold", 65280);
+   S_s_20 = "\nLisensi https://www.facebook.com/septi.fx.profit \n================================\nINFORMATION:\n  Nama Broker " + LegacyAccountCompany();
+   S_s_20 = S_s_20 + "\n";
+   S_s_20 = S_s_20 + "================================";
+   S_s_20 = S_s_20 + "\n";
+   S_s_20 = S_s_20 + "ACC INFORMATION:";
+   S_s_20 = S_s_20 + "\n";
+   S_s_20 = S_s_20 + "  Nomor Account :";
+   S_s_21 = (string)LegacyAccountNumber();
+   S_s_20 = S_s_20 + S_s_21;
+   S_s_20 = S_s_20 + "\n";
+   S_s_20 = S_s_20 + "  Account Leverage: ";
+   S_s_20 = S_s_20 + DoubleToString(LegacyAccountLeverage(), 0);
+   S_s_20 = S_s_20 + "\n";
+   S_s_20 = S_s_20 + "  Mata Uang : ";
+   S_s_20 = S_s_20 + LegacyAccountCurrency();
+   S_s_20 = S_s_20 + "\n";
+   S_s_20 = S_s_20 + "  EQUITY: ";
+   S_s_20 = S_s_20 + DoubleToString(LegacyAccountEquity(), 2);
+   S_s_20 = S_s_20 + "\n";
+   S_s_20 = S_s_20 + "  BALANCE:";
+   S_s_20 = S_s_20 + DoubleToString(LegacyAccountBalance(), 2);
+   S_s_20 = S_s_20 + "\n";
+   S_s_20 = S_s_20 + "=================";
+   S_s_20 = S_s_20 + "\n";
+   S_s_20 = S_s_20 + "MARGIN INFORMATION:";
+   S_s_20 = S_s_20 + "\n";
+   S_s_20 = S_s_20 + "  Free Margin : ";
+   S_s_20 = S_s_20 + DoubleToString(LegacyAccountFreeMargin(), 2);
+   S_s_20 = S_s_20 + "\n";
+   S_s_20 = S_s_20 + "  Used Margin : ";
+   S_s_20 = S_s_20 + DoubleToString(LegacyAccountMargin(), 2);
+   Comment("\n ", S_s_20, "\n\n\n :: Spread: ", LegacyMarketInfo(_Symbol, LEGACY_MODE_SPREAD), "\n=================");
+   L_d_0 = 0;
+   L_d_1 = 0;
+   L_d_2 = 0;
+   L_d_3 = 0;
+   L_i_3 = (int)LegacyMarketInfo(_Symbol, LEGACY_MODE_STOPLEVEL);
+   L_i_4 = (int)LegacyMarketInfo(_Symbol, LEGACY_MODE_SPREAD);
+   L_d_4 = LegacyMarketInfo(_Symbol, LEGACY_MODE_POINT);
+   L_d_5 = LegacyMarketInfo(_Symbol, LEGACY_MODE_BID);
+   L_d_6 = LegacyMarketInfo(_Symbol, LEGACY_MODE_ASK);
+   L_i_5 = (int)LegacyMarketInfo(_Symbol, LEGACY_MODE_DIGITS);
+   if (Use_Daily_Target) {
+      G_d_2 = 0;
+      G_i_2 = LegacyHistoryTotal() - 1;
+      if (G_i_2 >= 0) {
+         do {
+            if (LegacyOrderSelect(G_i_2, 0, 1) && LegacyOrderMagicNumber() == I_i_0) {
+               G_l_1 = LegacyOrderCloseTime();
+               if (G_l_1 >= LegacyITime(_Symbol, 1440, 0) && LegacyOrderType() <= LEGACY_OP_SELL) {
+                  G_d_33 = LegacyOrderProfit();
+                  G_d_33 = (G_d_33 + LegacyOrderCommission());
+                  G_d_2 = ((G_d_33 + LegacyOrderSwap()) + G_d_2);
+               }
+            }
+            G_i_2 = G_i_2 - 1;
+         } while (G_i_2 >= 0);
+      }
+      if ((G_d_2 >= Daily_Target)) {
+         G_i_70 = LegacyOrdersTotal() - 1;
+         G_i_3 = G_i_70;
+         if (G_i_70 >= 0) {
+            do {
+               I_b_7 = LegacyOrderSelect(G_i_3, 0, 0);
+               if (LegacyOrderSymbol() == _Symbol) {
+                  if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+                     if (LegacyOrderType() == LEGACY_OP_BUY) {
+                        I_b_7 = LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), gBid, (int)I_d_34, 16711680);
+                     }
+                     if (LegacyOrderType() == LEGACY_OP_SELL) {
+                        I_b_7 = LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), gAsk, (int)I_d_34, 255);
+                     }
+                  }
+                  Sleep(1000);
+               }
+               G_i_3 = G_i_3 - 1;
+            } while (G_i_3 >= 0);
+         }
+         Print("\nSelamat target harian tercapai");
+         L_i_15 = 0;
+         return L_i_15;
+      }
+   }
+   if (Hidden_TP) {
+      G_d_3 = 0;
+      G_i_4 = 0;
+      G_i_4 = 0;
+      if (LegacyOrdersTotal() > 0) {
+         do {
+            if (LegacyOrderSelect(G_i_4, 0, 0) && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_0) {
+               G_d_3 = (G_d_3 + LegacyOrderProfit());
+            }
+            G_i_4 = G_i_4 + 1;
+         } while (G_i_4 < LegacyOrdersTotal());
+      }
+      if ((Hiden_TP <= G_d_3)) {
+         Print("\nMagic Take Profit");
+         G_i_73 = LegacyOrdersTotal() - 1;
+         G_i_5 = G_i_73;
+         if (G_i_73 >= 0) {
+            do {
+               I_b_7 = LegacyOrderSelect(G_i_5, 0, 0);
+               if (LegacyOrderSymbol() == _Symbol) {
+                  if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+                     if (LegacyOrderType() == LEGACY_OP_BUY) {
+                        I_b_7 = LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), gBid, (int)I_d_34, 16711680);
+                     }
+                     if (LegacyOrderType() == LEGACY_OP_SELL) {
+                        I_b_7 = LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), gAsk, (int)I_d_34, 255);
+                     }
+                  }
+                  Sleep(1000);
+               }
+               G_i_5 = G_i_5 - 1;
+            } while (G_i_5 >= 0);
+         }
+      }
+   }
+   if ((I_d_43 == 0)) {
+      I_d_43 = LegacyAccountBalance();
+   }
+   if (I_b_10) {
+      I_d_44 = Lot;
+   } else {
+      if ((I_d_44 <= 0)) {
+         I_d_44 = (((LegacyAccountBalance() * I_d_105) / 100) / 10000);
+      } else {
+         if ((I_i_76 == Averaging)) {
+            if (I_i_77 == 1) {
+               I_d_44 = (I_d_44 * LotMultiplikator);
+            } else {
+               I_d_44 = (I_d_44 + Lot);
+            }
+         }
+      }
+   }
+   if ((I_i_76 >= Averaging)) {
+      I_i_76 = -2;
+   }
+   G_i_7 = 0;
+   S_s_21 = _Symbol;
+   G_i_8 = LegacyOrdersTotal();
+   G_i_9 = 0;
+   G_i_10 = 0;
+   if (G_i_8 > 0) {
+      do {
+         bool order_select = LegacyOrderSelect(G_i_10, 0, 0);
+         if (LegacyOrderMagicNumber() == I_i_0 && LegacyOrderSymbol() == S_s_21 && G_i_7 == LegacyOrderType()) {
+            G_i_75 = G_i_9 + 1;
+            G_i_9 = G_i_75;
+         }
+         G_i_10 = G_i_10 + 1;
+      } while (G_i_10 < G_i_8);
+   }
+   G_i_6 = G_i_9;
+   G_i_11 = 1;
+   S_s_22 = _Symbol;
+   G_i_12 = LegacyOrdersTotal();
+   G_i_13 = 0;
+   G_i_14 = 0;
+   if (G_i_12 > 0) {
+      do {
+         bool order_select = LegacyOrderSelect(G_i_14, 0, 0);
+         if (LegacyOrderMagicNumber() == I_i_0 && LegacyOrderSymbol() == S_s_22 && G_i_11 == LegacyOrderType()) {
+            G_i_75 = G_i_13 + 1;
+            G_i_13 = G_i_75;
+         }
+         G_i_14 = G_i_14 + 1;
+      } while (G_i_14 < G_i_12);
+   }
+   G_i_75 = G_i_6 + G_i_13;
+   if (G_i_75 == 0) {
+      I_i_76 = -2;
+      G_b_9 = (I_d_43 != LegacyAccountBalance());
+      if (G_b_9) {
+         I_d_43 = 0;
+         I_d_44 = 0;
+      }
+   }
+   if (I_i_77 == 1) {
+      I_d_45 = LotMultiplikator;
+   } else {
+      I_d_45 = Lot;
+   }
+   I_d_46 = TakeProfit;
+   I_d_47 = Step;
+   I_i_71 = I_i_0;
+   L_s_1 = "false";
+   L_s_2 = "false";
+   G_i_75 = I_b_11;
+   if ((G_i_75 == 0)
+         || (I_b_11 && I_i_78 > I_i_79 && LegacyHour() >= I_i_79 && LegacyHour() <= I_i_78)
+         || (I_i_79 > I_i_78 && LegacyHour() < I_i_78 && LegacyHour() > I_i_79)) {
+      L_s_1 = "true";
+   }
+   if (I_b_11) {
+      if ((I_i_78 > I_i_79 && LegacyHour() < I_i_79 && LegacyHour() > I_i_78)
+            || (I_i_79 > I_i_78 && LegacyHour() >= I_i_78 && LegacyHour() <= I_i_79)) {
+         L_s_2 = "true";
+      }
+   }
+   if (I_b_12) {
+      f0_18((int)I_d_50, (int)I_d_49, (int)I_d_48);
+   }
+   if (I_b_13) {
+      G_l_3 = TimeCurrent();
+      G_l_4 = I_i_80;
+      if (G_l_3 >= G_l_4) {
+         G_i_81 = LegacyOrdersTotal() - 1;
+         G_i_15 = G_i_81;
+         if (G_i_81 >= 0) {
+            do {
+               I_b_7 = LegacyOrderSelect(G_i_15, 0, 0);
+               if (LegacyOrderSymbol() == _Symbol) {
+                  if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+                     if (LegacyOrderType() == LEGACY_OP_BUY) {
+                        I_b_7 = LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), gBid, (int)I_d_34, 16711680);
+                     }
+                     if (LegacyOrderType() == LEGACY_OP_SELL) {
+                        I_b_7 = LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), gAsk, (int)I_d_34, 255);
+                     }
+                  }
+                  Sleep(1000);
+               }
+               G_i_15 = G_i_15 - 1;
+            } while (G_i_15 >= 0);
+         }
+         Print("Closed All due to TimeOut");
+      }
+   }
+   G_d_4 = 0;
+   I_i_84 = LegacyOrdersTotal() - 1;
+   if (I_i_84 >= 0) {
+      do {
+         I_b_7 = LegacyOrderSelect(I_i_84, 0, 0);
+         if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+            if (LegacyOrderType() == LEGACY_OP_BUY || LegacyOrderType() == LEGACY_OP_SELL) {
+               G_d_4 = (G_d_4 + LegacyOrderProfit());
+            }
+         }
+         I_i_84 = I_i_84 - 1;
+      } while (I_i_84 >= 0);
+   }
+   L_d_7 = G_d_4;
+   if (UseEquityStop && (G_d_4 < 0)) {
+      G_d_55 = MathAbs(G_d_4);
+      G_d_56 = (TotalEquityRisk / 100);
+      G_i_16 = 0;
+      G_i_85 = LegacyOrdersTotal() - 1;
+      G_i_17 = G_i_85;
+      if (G_i_85 >= 0) {
+         do {
+            I_b_7 = LegacyOrderSelect(G_i_17, 0, 0);
+            if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+               if (LegacyOrderType() == LEGACY_OP_SELL || LegacyOrderType() == LEGACY_OP_BUY) {
+                  G_i_16 = G_i_16 + 1;
+               }
+            }
+            G_i_17 = G_i_17 - 1;
+         } while (G_i_17 >= 0);
+      }
+      if (G_i_16 == 0) {
+         I_d_57 = LegacyAccountEquity();
+      }
+      if ((I_d_57 < I_d_58)) {
+         I_d_57 = I_d_58;
+      } else {
+         I_d_57 = LegacyAccountEquity();
+      }
+      I_d_58 = LegacyAccountEquity();
+      if ((G_d_55 > (G_d_56 * I_d_57))) {
+         G_i_85 = LegacyOrdersTotal() - 1;
+         G_i_18 = G_i_85;
+         if (G_i_85 >= 0) {
+            do {
+               I_b_7 = LegacyOrderSelect(G_i_18, 0, 0);
+               if (LegacyOrderSymbol() == _Symbol) {
+                  if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+                     if (LegacyOrderType() == LEGACY_OP_BUY) {
+                        I_b_7 = LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), gBid, (int)I_d_34, 16711680);
+                     }
+                     if (LegacyOrderType() == LEGACY_OP_SELL) {
+                        I_b_7 = LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), gAsk, (int)I_d_34, 255);
+                     }
+                  }
+                  Sleep(1000);
+               }
+               G_i_18 = G_i_18 - 1;
+            } while (G_i_18 >= 0);
+         }
+         Print("Closed All due to Stop Out");
+         I_b_16 = false;
+      }
+   }
+   G_i_19 = 0;
+   G_i_87 = LegacyOrdersTotal() - 1;
+   G_i_20 = G_i_87;
+   if (G_i_87 >= 0) {
+      do {
+         I_b_7 = LegacyOrderSelect(G_i_20, 0, 0);
+         if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+            if (LegacyOrderType() == LEGACY_OP_SELL || LegacyOrderType() == LEGACY_OP_BUY) {
+               G_i_19 = G_i_19 + 1;
+            }
+         }
+         G_i_20 = G_i_20 - 1;
+      } while (G_i_20 >= 0);
+   }
+   I_i_88 = G_i_19;
+   if (G_i_19 == 0) {
+      I_b_17 = false;
+   }
+   I_i_84 = LegacyOrdersTotal() - 1;
+   if (I_i_84 >= 0) {
+      do {
+         I_b_7 = LegacyOrderSelect(I_i_84, 0, 0);
+         if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+            if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_BUY) {
+               I_b_18 = true;
+               I_b_19 = false;
+               L_d_0 = LegacyOrderLots();
+               break;
+            }
+            if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_SELL) {
+               I_b_18 = false;
+               I_b_19 = true;
+               L_d_1 = LegacyOrderLots();
+               break;
+            }
+         }
+         I_i_84 = I_i_84 - 1;
+      } while (I_i_84 >= 0);
+   }
+   if (I_i_88 > 0 && I_i_88 <= MaxTrades) {
+      LegacyRefreshRates();
+      G_d_5 = 0;
+      G_i_21 = 0;
+      G_i_22 = 0;
+      G_i_87 = LegacyOrdersTotal() - 1;
+      G_i_23 = G_i_87;
+      if (G_i_87 >= 0) {
+         do {
+            I_b_7 = LegacyOrderSelect(G_i_23, 0, 0);
+            if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_BUY) {
+               G_i_21 = LegacyOrderTicket();
+               if (G_i_21 > G_i_22) {
+                  G_d_5 = LegacyOrderOpenPrice();
+                  G_i_22 = G_i_21;
+               }
+            }
+            G_i_23 = G_i_23 - 1;
+         } while (G_i_23 >= 0);
+      }
+      I_d_63 = G_d_5;
+      G_d_6 = 0;
+      G_i_24 = 0;
+      G_i_25 = 0;
+      G_i_87 = LegacyOrdersTotal() - 1;
+      G_i_26 = G_i_87;
+      if (G_i_87 >= 0) {
+         do {
+            I_b_7 = LegacyOrderSelect(G_i_26, 0, 0);
+            if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_SELL) {
+               G_i_24 = LegacyOrderTicket();
+               if (G_i_24 > G_i_25) {
+                  G_d_6 = LegacyOrderOpenPrice();
+                  G_i_25 = G_i_24;
+               }
+            }
+            G_i_26 = G_i_26 - 1;
+         } while (G_i_26 >= 0);
+      }
+      I_d_64 = G_d_6;
+      if (I_b_20 == 0) {
+         if (I_b_18) {
+            G_d_65 = (I_d_63 - gAsk);
+            if ((G_d_65 >= (I_d_47 * _Point))) {
+               I_b_22 = true;
+            }
+         }
+         if (I_b_19 != false) {
+            G_d_65 = (gBid - I_d_64);
+            if ((G_d_65 >= (I_d_47 * _Point))) {
+               I_b_22 = true;
+            }
+         }
+      } else {
+         if (I_b_20 == true && gVolume[0] < 5) {
+            if (I_b_18) {
+               G_d_104 = (I_d_63 - gAsk);
+               if ((G_d_104 >= (I_d_47 * _Point))) {
+                  I_b_22 = true;
+               }
+            }
+            if (I_b_19) {
+               G_d_104 = (gBid - I_d_64);
+               if ((G_d_104 >= (I_d_47 * _Point))) {
+                  I_b_22 = true;
+               }
+            }
+         }
+      }
+   }
+   if (I_i_88 < 1) {
+      I_b_19 = false;
+      I_b_18 = false;
+      if (I_b_20 == 0) {
+         I_b_22 = true;
+      } else {
+         if (I_b_20 == true && gVolume[0] < 2) {
+            I_b_22 = true;
+         }
+      }
+      I_d_66 = LegacyAccountEquity();
+      I_d_66 = LegacyAccountEquity();
+   }
+   if (I_b_22) {
+      G_d_7 = 0;
+      G_i_27 = 0;
+      G_i_28 = 0;
+      G_i_89 = LegacyOrdersTotal() - 1;
+      G_i_29 = G_i_89;
+      if (G_i_89 >= 0) {
+         do {
+            I_b_7 = LegacyOrderSelect(G_i_29, 0, 0);
+            if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_BUY) {
+               G_i_27 = LegacyOrderTicket();
+               if (G_i_27 > G_i_28) {
+                  G_d_7 = LegacyOrderOpenPrice();
+                  G_i_28 = G_i_27;
+               }
+            }
+            G_i_29 = G_i_29 - 1;
+         } while (G_i_29 >= 0);
+      }
+      I_d_63 = G_d_7;
+      G_d_8 = 0;
+      G_i_30 = 0;
+      G_i_31 = 0;
+      G_i_89 = LegacyOrdersTotal() - 1;
+      G_i_32 = G_i_89;
+      if (G_i_89 >= 0) {
+         do {
+            I_b_7 = LegacyOrderSelect(G_i_32, 0, 0);
+            if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_SELL) {
+               G_i_30 = LegacyOrderTicket();
+               if (G_i_30 > G_i_31) {
+                  G_d_8 = LegacyOrderOpenPrice();
+                  G_i_31 = G_i_30;
+               }
+            }
+            G_i_32 = G_i_32 - 1;
+         } while (G_i_32 >= 0);
+      }
+      I_d_64 = G_d_8;
+      if (I_b_19 != false) {
+         if (I_b_23 || L_s_2 == "true") {
+            f0_1(false, true);
+            if (I_i_76 == -2) {
+               if (I_i_77 == 1) {
+                  I_d_69 = NormalizeDouble((I_d_45 * L_d_1), (int)I_d_67);
+               } else {
+                  I_d_69 = NormalizeDouble((Lot + L_d_1), (int)I_d_67);
+               }
+            }
+         } else {
+            if (I_i_76 == -2) {
+               G_d_10 = 0;
+               G_i_33 = 0;
+               I_i_1 = I_i_98;
+               if (I_i_1 == 0) {
+                  G_d_10 = I_d_44;
+               }
+               if (I_i_1 == 1) {
+                  if (I_i_77 == 1) {
+                     returned_double = MathPow(I_d_45, I_i_90);
+                     G_d_10 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                  } else {
+                     if (I_i_76 == -2) {
+                        G_d_10 = NormalizeDouble(I_d_44, (int)I_d_67);
+                     }
+                  }
+               }
+               if (I_i_1 == 2) {
+                  G_i_33 = 0;
+                  G_d_10 = I_d_44;
+                  G_i_119 = LegacyHistoryTotal() - 1;
+                  G_i_34 = G_i_119;
+                  if (G_i_119 >= 0) {
+                     do {
+                        if (!LegacyOrderSelect(G_i_34, 0, 1)) {
+                           G_d_9 = -3;
+                           break;
+                        }
+                        if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+                           G_l_14 = LegacyOrderCloseTime();
+                           G_l_15 = G_i_33;
+                           if (G_l_15 < G_l_14) {
+                              G_i_33 = (int)LegacyOrderCloseTime();
+                              if ((LegacyOrderProfit() < 0)) {
+                                 if (I_i_77 == 1) {
+                                    G_d_10 = NormalizeDouble((LegacyOrderLots() * I_d_45), (int)I_d_67);
+                                 } else {
+                                    G_d_10 = NormalizeDouble((LegacyOrderLots() + Lot), (int)I_d_67);
+                                 }
+                              } else {
+                                 G_d_10 = I_d_44;
+                              }
+                           }
+                        }
+                        G_i_34 = G_i_34 - 1;
+                     } while (G_i_34 >= 0);
+                  }
+               }
+               G_i_91 = LegacyGetLastError();
+               if (G_i_91 == 134) {
+                  G_d_9 = -2;
+               } else {
+                  G_d_9 = G_d_10;
+               }
+               I_d_69 = G_d_9;
+            }
+         }
+         if (I_b_24 && L_s_1 == "true") {
+            I_i_90 = I_i_88;
+            if ((I_d_69 > 0)) {
+               LegacyRefreshRates();
+               S_s_23 = _Symbol + "-";
+               S_s_23 = S_s_23 + I_s_2;
+               S_s_23 = S_s_23 + "-";
+               S_s_14 = (string)I_i_88;
+               S_s_23 = S_s_23 + S_s_14;
+               I_i_92 = f0_15(1, I_d_69, gBid, (int)I_d_34, gAsk, 0, 0, S_s_23, I_i_71, 0, 11823615);
+               if (I_i_92 < 0) {
+                  Print("Error: ", LegacyGetLastError());
+                  L_i_15 = 0;
+                  return L_i_15;
+               }
+               G_d_11 = 0;
+               G_i_35 = 0;
+               G_i_36 = 0;
+               G_i_91 = LegacyOrdersTotal() - 1;
+               G_i_37 = G_i_91;
+               if (G_i_91 >= 0) {
+                  do {
+                     I_b_7 = LegacyOrderSelect(G_i_37, 0, 0);
+                     if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_SELL) {
+                        G_i_35 = LegacyOrderTicket();
+                        if (G_i_35 > G_i_36) {
+                           G_d_11 = LegacyOrderOpenPrice();
+                           G_i_36 = G_i_35;
+                        }
+                     }
+                     G_i_37 = G_i_37 - 1;
+                  } while (G_i_37 >= 0);
+               }
+               I_d_64 = G_d_11;
+               I_b_22 = false;
+               I_b_16 = true;
+            }
+         }
+      } else {
+         if (I_b_18) {
+            if (I_b_23 || L_s_2 == "true") {
+               f0_1(true, false);
+               if (I_i_76 == -2) {
+                  if (I_i_77 == 1) {
+                     I_d_69 = NormalizeDouble((I_d_45 * L_d_0), (int)I_d_67);
+                  } else {
+                     I_d_69 = NormalizeDouble((Lot + L_d_0), (int)I_d_67);
+                  }
+               }
+            } else {
+               if (I_i_76 == -2) {
+                  G_d_13 = 0;
+                  G_i_38 = 0;
+                  I_i_1 = I_i_98;
+                  if (I_i_1 == 0) {
+                     G_d_13 = I_d_44;
+                  }
+                  if (I_i_1 == 1) {
+                     if (I_i_77 == 1) {
+                        returned_double = MathPow(I_d_45, I_i_90);
+                        G_d_13 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                     } else {
+                        if (I_i_76 == -2) {
+                           G_d_13 = NormalizeDouble(I_d_44, (int)I_d_67);
+                        }
+                     }
+                  }
+                  if (I_i_1 == 2) {
+                     G_i_38 = 0;
+                     G_d_13 = I_d_44;
+                     G_i_124 = LegacyHistoryTotal() - 1;
+                     G_i_39 = G_i_124;
+                     if (G_i_124 >= 0) {
+                        do {
+                           if (!LegacyOrderSelect(G_i_39, 0, 1)) {
+                              G_d_12 = -3;
+                              break;
+                           }
+                           if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+                              G_l_16 = LegacyOrderCloseTime();
+                              G_l_17 = G_i_38;
+                              if (G_l_17 < G_l_16) {
+                                 G_i_38 = (int)LegacyOrderCloseTime();
+                                 if ((LegacyOrderProfit() < 0)) {
+                                    if (I_i_77 == 1) {
+                                       G_d_13 = NormalizeDouble((LegacyOrderLots() * I_d_45), (int)I_d_67);
+                                    } else {
+                                       G_d_13 = NormalizeDouble((LegacyOrderLots() + Lot), (int)I_d_67);
+                                    }
+                                 } else {
+                                    G_d_13 = I_d_44;
+                                 }
+                              }
+                           }
+                           G_i_39 = G_i_39 - 1;
+                        } while (G_i_39 >= 0);
+                     }
+                  }
+                  G_i_93 = LegacyGetLastError();
+                  if (G_i_93 == 134) {
+                     G_d_12 = -2;
+                  } else {
+                     G_d_12 = G_d_13;
+                  }
+                  I_d_69 = G_d_12;
+               }
+            }
+            if (I_b_24 && L_s_1 == "true") {
+               I_i_90 = I_i_88;
+               if ((I_d_69 > 0)) {
+                  S_s_14 = _Symbol + "-";
+                  S_s_14 = S_s_14 + I_s_2;
+                  S_s_14 = S_s_14 + "-";
+                  S_s_15 = (string)I_i_88;
+                  S_s_14 = S_s_14 + S_s_15;
+                  I_i_92 = f0_15(0, I_d_69, gAsk, (int)I_d_34, gBid, 0, 0, S_s_14, I_i_71, 0, 65280);
+                  if (I_i_92 < 0) {
+                     Print("Error: ", LegacyGetLastError());
+                     L_i_15 = 0;
+                     return L_i_15;
+                  }
+                  G_d_14 = 0;
+                  G_i_40 = 0;
+                  G_i_41 = 0;
+                  G_i_93 = LegacyOrdersTotal() - 1;
+                  G_i_42 = G_i_93;
+                  if (G_i_93 >= 0) {
+                     do {
+                        I_b_7 = LegacyOrderSelect(G_i_42, 0, 0);
+                        if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_BUY) {
+                           G_i_40 = LegacyOrderTicket();
+                           if (G_i_40 > G_i_41) {
+                              G_d_14 = LegacyOrderOpenPrice();
+                              G_i_41 = G_i_40;
+                           }
+                        }
+                        G_i_42 = G_i_42 - 1;
+                     } while (G_i_42 >= 0);
+                  }
+                  I_d_63 = G_d_14;
+                  I_b_22 = false;
+                  I_b_16 = true;
+               }
+            }
+         }
+      }
+   }
+   if ((OpenRangePips > 0) && (MaxDailyRange > 0)) {
+      G_d_15 = 0;
+      G_i_43 = LegacyDayOfYear();
+      G_i_44 = 0;
+      if (gBars > 0) {
+         do {
+            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, _Period, G_i_44)) == G_i_43) {
+               G_d_15 = LegacyIOpen(_Symbol, _Period, G_i_44);
+            }
+            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, _Period, G_i_44)) != G_i_43) break;
+            G_i_44 = G_i_44 + 1;
+         } while (G_i_44 < gBars);
+      }
+      L_d_8 = NormalizeDouble(((OpenRangePips * _Point) + G_d_15), _Digits);
+      G_d_16 = 0;
+      G_i_45 = LegacyDayOfYear();
+      G_i_46 = 0;
+      if (gBars > 0) {
+         do {
+            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, _Period, G_i_46)) == G_i_45) {
+               G_d_16 = LegacyIOpen(_Symbol, _Period, G_i_46);
+            }
+            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, _Period, G_i_46)) != G_i_45) break;
+            G_i_46 = G_i_46 + 1;
+         } while (G_i_46 < gBars);
+      }
+      G_d_70 = (OpenRangePips * _Point);
+      L_d_9 = NormalizeDouble((G_d_16 - G_d_70), _Digits);
+      L_d_10 = NormalizeDouble(((MaxDailyRange * _Point) + L_d_8), _Digits);
+      G_d_70 = (MaxDailyRange * _Point);
+      L_d_11 = NormalizeDouble((L_d_9 - G_d_70), _Digits);
+      if ((gClose[0] > L_d_8 && gClose[0] < L_d_10) || (gClose[0] < L_d_9 && gClose[0] > L_d_11)) {
+         if (I_b_22 && I_i_88 < 1) {
+            G_b_0 = true;
+            if (TradeOnThursday == false && LegacyDayOfWeek() == 4) {
+               G_b_0 = false;
+            }
+            if (TradeOnThursday && LegacyDayOfWeek() == 4 && LegacyTimeHour(TimeCurrent()) > Thursday_Hour) {
+               G_b_0 = false;
+            }
+            if (TradeOnFriday == false && LegacyDayOfWeek() == 5) {
+               G_b_0 = false;
+            }
+            if (TradeOnFriday && LegacyDayOfWeek() == 5 && LegacyTimeHour(TimeCurrent()) > Friday_Hour) {
+               G_b_0 = false;
+            }
+            if (gLegacyOpenHour == 24) {
+               gLegacyOpenHour = 0;
+            }
+            if (gLegacyCloseHour == 24) {
+               gLegacyCloseHour = 0;
+            }
+            if (gLegacyOpenHour < gLegacyCloseHour) {
+               if (LegacyTimeHour(TimeCurrent()) < gLegacyOpenHour || LegacyTimeHour(TimeCurrent()) >= gLegacyCloseHour) {
+                  G_b_0 = false;
+               }
+            }
+            if (gLegacyOpenHour > gLegacyCloseHour && LegacyTimeHour(TimeCurrent()) < gLegacyOpenHour && LegacyTimeHour(TimeCurrent()) >= gLegacyCloseHour) {
+               G_b_0 = false;
+            }
+            G_i_97 = G_b_0;
+            if (G_i_97 == 1) {
+               L_d_2 = LegacyIClose(_Symbol, 0, 2);
+               returned_double = LegacyIClose(_Symbol, 0, 1);
+               L_d_3 = returned_double;
+               I_d_74 = gBid;
+               I_d_75 = gAsk;
+               if (I_b_19 == false && I_b_18 == false && L_s_1 == "true") {
+                  I_i_90 = I_i_88;
+                  if ((L_d_2 > returned_double)) {
+                     if (I_i_76 == -2) {
+                        G_d_18 = 0;
+                        G_i_47 = 0;
+                        I_i_1 = I_i_98;
+                        if (I_i_1 == 0) {
+                           G_d_18 = I_d_44;
+                        }
+                        if (I_i_1 == 1) {
+                           if (I_i_77 == 1) {
+                              returned_double = MathPow(I_d_45, I_i_90);
+                              G_d_18 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                           } else {
+                              if (I_i_76 == -2) {
+                                 G_d_18 = NormalizeDouble(I_d_44, (int)I_d_67);
+                              }
+                           }
+                        }
+                        if (I_i_1 == 2) {
+                           G_i_47 = 0;
+                           G_d_18 = I_d_44;
+                           G_i_102 = LegacyHistoryTotal() - 1;
+                           G_i_48 = G_i_102;
+                           if (G_i_102 >= 0) {
+                              do {
+                                 if (!LegacyOrderSelect(G_i_48, 0, 1)) {
+                                    G_d_17 = -3;
+                                    break;
+                                 }
+                                 if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+                                    G_l_6 = LegacyOrderCloseTime();
+                                    G_l_7 = G_i_47;
+                                    if (G_l_7 < G_l_6) {
+                                       G_i_47 = (int)LegacyOrderCloseTime();
+                                       if ((LegacyOrderProfit() < 0)) {
+                                          if (I_i_77 == 1) {
+                                             G_d_18 = NormalizeDouble((LegacyOrderLots() * I_d_45), (int)I_d_67);
+                                          } else {
+                                             G_d_18 = NormalizeDouble((LegacyOrderLots() + Lot), (int)I_d_67);
+                                          }
+                                       } else {
+                                          G_d_18 = I_d_44;
+                                       }
+                                    }
+                                 }
+                                 G_i_48 = G_i_48 - 1;
+                              } while (G_i_48 >= 0);
+                           }
+                        }
+                        G_i_99 = LegacyGetLastError();
+                        if (G_i_99 == 134) {
+                           G_d_17 = -2;
+                        } else {
+                           G_d_17 = G_d_18;
+                        }
+                        I_d_69 = G_d_17;
+                     }
+                     if ((I_d_69 > 0)) {
+                        S_s_15 = _Symbol + "-";
+                        S_s_15 = S_s_15 + I_s_2;
+                        S_s_15 = S_s_15 + "-";
+                        S_s_16 = (string)I_i_90;
+                        S_s_15 = S_s_15 + S_s_16;
+                        I_i_92 = f0_15(1, I_d_69, I_d_74, (int)I_d_34, I_d_74, 0, 0, S_s_15, I_i_71, 0, 11823615);
+                        if (I_i_92 < 0) {
+                           Print(I_d_69, "Error: ", LegacyGetLastError());
+                           L_i_15 = 0;
+                           return L_i_15;
+                        }
+                        G_d_19 = 0;
+                        G_i_49 = 0;
+                        G_i_50 = 0;
+                        G_i_99 = LegacyOrdersTotal() - 1;
+                        G_i_51 = G_i_99;
+                        if (G_i_99 >= 0) {
+                           do {
+                              I_b_7 = LegacyOrderSelect(G_i_51, 0, 0);
+                              if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_BUY) {
+                                 G_i_49 = LegacyOrderTicket();
+                                 if (G_i_49 > G_i_50) {
+                                    G_d_19 = LegacyOrderOpenPrice();
+                                    G_i_50 = G_i_49;
+                                 }
+                              }
+                              G_i_51 = G_i_51 - 1;
+                           } while (G_i_51 >= 0);
+                        }
+                        I_d_63 = G_d_19;
+                        I_b_16 = true;
+                     }
+                  } else {
+                     if (I_i_76 == -2) {
+                        G_d_21 = 0;
+                        G_i_52 = 0;
+                        I_i_1 = I_i_98;
+                        if (I_i_1 == 0) {
+                           G_d_21 = I_d_44;
+                        }
+                        if (I_i_1 == 1) {
+                           if (I_i_77 == 1) {
+                              returned_double = MathPow(I_d_45, I_i_90);
+                              G_d_21 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                           } else {
+                              if (I_i_76 == -2) {
+                                 G_d_21 = NormalizeDouble(I_d_44, (int)I_d_67);
+                              }
+                           }
+                        }
+                        if (I_i_1 == 2) {
+                           G_i_52 = 0;
+                           G_d_21 = I_d_44;
+                           G_i_106 = LegacyHistoryTotal() - 1;
+                           G_i_53 = G_i_106;
+                           if (G_i_106 >= 0) {
+                              do {
+                                 if (!LegacyOrderSelect(G_i_53, 0, 1)) {
+                                    G_d_20 = -3;
+                                    break;
+                                 }
+                                 if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+                                    G_l_8 = LegacyOrderCloseTime();
+                                    G_l_9 = G_i_52;
+                                    if (G_l_9 < G_l_8) {
+                                       G_i_52 = (int)LegacyOrderCloseTime();
+                                       if ((LegacyOrderProfit() < 0)) {
+                                          if (I_i_77 == 1) {
+                                             G_d_21 = NormalizeDouble((LegacyOrderLots() * I_d_45), (int)I_d_67);
+                                          } else {
+                                             G_d_21 = NormalizeDouble((LegacyOrderLots() + Lot), (int)I_d_67);
+                                          }
+                                       } else {
+                                          G_d_21 = I_d_44;
+                                       }
+                                    }
+                                 }
+                                 G_i_53 = G_i_53 - 1;
+                              } while (G_i_53 >= 0);
+                           }
+                        }
+                        G_i_105 = LegacyGetLastError();
+                        if (G_i_105 == 134) {
+                           G_d_20 = -2;
+                        } else {
+                           G_d_20 = G_d_21;
+                        }
+                        I_d_69 = G_d_20;
+                     }
+                     if ((I_d_69 > 0)) {
+                        S_s_16 = _Symbol + "-";
+                        S_s_16 = S_s_16 + I_s_2;
+                        S_s_16 = S_s_16 + "-";
+                        S_s_17 = (string)I_i_90;
+                        S_s_16 = S_s_16 + S_s_17;
+                        I_i_92 = f0_15(0, I_d_69, I_d_75, (int)I_d_34, I_d_75, 0, 0, S_s_16, I_i_71, 0, 65280);
+                        if (I_i_92 < 0) {
+                           Print(I_d_69, "Error: ", LegacyGetLastError());
+                           L_i_15 = 0;
+                           return L_i_15;
+                        }
+                        G_d_22 = 0;
+                        G_i_54 = 0;
+                        G_i_55 = 0;
+                        G_i_105 = LegacyOrdersTotal() - 1;
+                        G_i_56 = G_i_105;
+                        if (G_i_105 >= 0) {
+                           do {
+                              I_b_7 = LegacyOrderSelect(G_i_56, 0, 0);
+                              if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_SELL) {
+                                 G_i_54 = LegacyOrderTicket();
+                                 if (G_i_54 > G_i_55) {
+                                    G_d_22 = LegacyOrderOpenPrice();
+                                    G_i_55 = G_i_54;
+                                 }
+                              }
+                              G_i_56 = G_i_56 - 1;
+                           } while (G_i_56 >= 0);
+                        }
+                        I_d_64 = G_d_22;
+                        I_b_16 = true;
+                     }
+                  }
+               }
+            }
+         }
+         if (I_i_92 > 0) {
+            G_l_5 = TimeCurrent();
+            G_d_77 = ((I_d_76 * 60) * 60);
+            I_i_80 = (int)(G_l_5 + G_d_77);
+         }
+         I_b_22 = false;
+      }
+   } else {
+      if (I_b_22 && I_i_88 < 1) {
+         G_b_1 = true;
+         if (TradeOnThursday == false && LegacyDayOfWeek() == 4) {
+            G_b_1 = false;
+         }
+         if (TradeOnThursday && LegacyDayOfWeek() == 4 && LegacyTimeHour(TimeCurrent()) > Thursday_Hour) {
+            G_b_1 = false;
+         }
+         if (TradeOnFriday == false && LegacyDayOfWeek() == 5) {
+            G_b_1 = false;
+         }
+         if (TradeOnFriday && LegacyDayOfWeek() == 5 && LegacyTimeHour(TimeCurrent()) > Friday_Hour) {
+            G_b_1 = false;
+         }
+         if (gLegacyOpenHour == 24) {
+            gLegacyOpenHour = 0;
+         }
+         if (gLegacyCloseHour == 24) {
+            gLegacyCloseHour = 0;
+         }
+         if (gLegacyOpenHour < gLegacyCloseHour) {
+            if (LegacyTimeHour(TimeCurrent()) < gLegacyOpenHour || LegacyTimeHour(TimeCurrent()) >= gLegacyCloseHour) {
+               G_b_1 = false;
+            }
+         }
+         if (gLegacyOpenHour > gLegacyCloseHour && LegacyTimeHour(TimeCurrent()) < gLegacyOpenHour && LegacyTimeHour(TimeCurrent()) >= gLegacyCloseHour) {
+            G_b_1 = false;
+         }
+         G_i_110 = G_b_1;
+         if (G_i_110 == 1) {
+            L_d_2 = LegacyIClose(_Symbol, 0, 2);
+            returned_double = LegacyIClose(_Symbol, 0, 1);
+            L_d_3 = returned_double;
+            I_d_74 = gBid;
+            I_d_75 = gAsk;
+            if (I_b_19 == false && I_b_18 == false && L_s_1 == "true") {
+               I_i_90 = I_i_88;
+               if ((L_d_2 > returned_double)) {
+                  if (I_i_76 == -2) {
+                     G_d_24 = 0;
+                     G_i_57 = 0;
+                     I_i_1 = I_i_98;
+                     if (I_i_1 == 0) {
+                        G_d_24 = I_d_44;
+                     }
+                     if (I_i_1 == 1) {
+                        if (I_i_77 == 1) {
+                           returned_double = MathPow(I_d_45, I_i_90);
+                           G_d_24 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                        } else {
+                           if (I_i_76 == -2) {
+                              G_d_24 = NormalizeDouble(I_d_44, (int)I_d_67);
+                           }
+                        }
+                     }
+                     if (I_i_1 == 2) {
+                        G_i_57 = 0;
+                        G_d_24 = I_d_44;
+                        G_i_112 = LegacyHistoryTotal() - 1;
+                        G_i_58 = G_i_112;
+                        if (G_i_112 >= 0) {
+                           do {
+                              if (!LegacyOrderSelect(G_i_58, 0, 1)) {
+                                 G_d_23 = -3;
+                                 break;
+                              }
+                              if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+                                 G_l_10 = LegacyOrderCloseTime();
+                                 G_l_11 = G_i_57;
+                                 if (G_l_11 < G_l_10) {
+                                    G_i_57 = (int)LegacyOrderCloseTime();
+                                    if ((LegacyOrderProfit() < 0)) {
+                                       if (I_i_77 == 1) {
+                                          G_d_24 = NormalizeDouble((LegacyOrderLots() * I_d_45), (int)I_d_67);
+                                       } else {
+                                          G_d_24 = NormalizeDouble((LegacyOrderLots() + Lot), (int)I_d_67);
+                                       }
+                                    } else {
+                                       G_d_24 = I_d_44;
+                                    }
+                                 }
+                              }
+                              G_i_58 = G_i_58 - 1;
+                           } while (G_i_58 >= 0);
+                        }
+                     }
+                     G_i_111 = LegacyGetLastError();
+                     if (G_i_111 == 134) {
+                        G_d_23 = -2;
+                     } else {
+                        G_d_23 = G_d_24;
+                     }
+                     I_d_69 = G_d_23;
+                  }
+                  if ((I_d_69 > 0)) {
+                     S_s_17 = _Symbol + "-";
+                     S_s_17 = S_s_17 + I_s_2;
+                     S_s_17 = S_s_17 + "-";
+                     S_s_18 = (string)I_i_90;
+                     S_s_17 = S_s_17 + S_s_18;
+                     I_i_92 = f0_15(1, I_d_69, I_d_74, (int)I_d_34, I_d_74, 0, 0, S_s_17, I_i_71, 0, 11823615);
+                     if (I_i_92 < 0) {
+                        Print(I_d_69, "Error: ", LegacyGetLastError());
+                        L_i_15 = 0;
+                        return L_i_15;
+                     }
+                     G_d_25 = 0;
+                     G_i_59 = 0;
+                     G_i_60 = 0;
+                     G_i_111 = LegacyOrdersTotal() - 1;
+                     G_i_61 = G_i_111;
+                     if (G_i_111 >= 0) {
+                        do {
+                           I_b_7 = LegacyOrderSelect(G_i_61, 0, 0);
+                           if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_BUY) {
+                              G_i_59 = LegacyOrderTicket();
+                              if (G_i_59 > G_i_60) {
+                                 G_d_25 = LegacyOrderOpenPrice();
+                                 G_i_60 = G_i_59;
+                              }
+                           }
+                           G_i_61 = G_i_61 - 1;
+                        } while (G_i_61 >= 0);
+                     }
+                     I_d_63 = G_d_25;
+                     I_b_16 = true;
+                  }
+               } else {
+                  if (I_i_76 == -2) {
+                     G_d_27 = 0;
+                     G_i_62 = 0;
+                     I_i_1 = I_i_98;
+                     if (I_i_1 == 0) {
+                        G_d_27 = I_d_44;
+                     }
+                     if (I_i_1 == 1) {
+                        if (I_i_77 == 1) {
+                           returned_double = MathPow(I_d_45, I_i_90);
+                           G_d_27 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                        } else {
+                           if (I_i_76 == -2) {
+                              G_d_27 = NormalizeDouble(I_d_44, (int)I_d_67);
+                           }
+                        }
+                     }
+                     if (I_i_1 == 2) {
+                        G_i_62 = 0;
+                        G_d_27 = I_d_44;
+                        G_i_115 = LegacyHistoryTotal() - 1;
+                        G_i_63 = G_i_115;
+                        if (G_i_115 >= 0) {
+                           do {
+                              if (!LegacyOrderSelect(G_i_63, 0, 1)) {
+                                 G_d_26 = -3;
+                                 break;
+                              }
+                              if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+                                 G_l_12 = LegacyOrderCloseTime();
+                                 G_l_13 = G_i_62;
+                                 if (G_l_13 < G_l_12) {
+                                    G_i_62 = (int)LegacyOrderCloseTime();
+                                    if ((LegacyOrderProfit() < 0)) {
+                                       if (I_i_77 == 1) {
+                                          G_d_27 = NormalizeDouble((LegacyOrderLots() * I_d_45), (int)I_d_67);
+                                       } else {
+                                          G_d_27 = NormalizeDouble((LegacyOrderLots() + Lot), (int)I_d_67);
+                                       }
+                                    } else {
+                                       G_d_27 = I_d_44;
+                                    }
+                                 }
+                              }
+                              G_i_63 = G_i_63 - 1;
+                           } while (G_i_63 >= 0);
+                        }
+                     }
+                     G_i_100 = LegacyGetLastError();
+                     if (G_i_100 == 134) {
+                        G_d_26 = -2;
+                     } else {
+                        G_d_26 = G_d_27;
+                     }
+                     I_d_69 = G_d_26;
+                  }
+                  if ((I_d_69 > 0)) {
+                     S_s_18 = _Symbol + "-";
+                     S_s_18 = S_s_18 + I_s_2;
+                     S_s_18 = S_s_18 + "-";
+                     S_s_19 = (string)I_i_90;
+                     S_s_18 = S_s_18 + S_s_19;
+                     I_i_92 = f0_15(0, I_d_69, I_d_75, (int)I_d_34, I_d_75, 0, 0, S_s_18, I_i_71, 0, 65280);
+                     if (I_i_92 < 0) {
+                        Print(I_d_69, "Error: ", LegacyGetLastError());
+                        L_i_15 = 0;
+                        return L_i_15;
+                     }
+                     G_d_28 = 0;
+                     G_i_64 = 0;
+                     G_i_65 = 0;
+                     G_i_100 = LegacyOrdersTotal() - 1;
+                     G_i_66 = G_i_100;
+                     if (G_i_100 >= 0) {
+                        do {
+                           I_b_7 = LegacyOrderSelect(G_i_66, 0, 0);
+                           if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_SELL) {
+                              G_i_64 = LegacyOrderTicket();
+                              if (G_i_64 > G_i_65) {
+                                 G_d_28 = LegacyOrderOpenPrice();
+                                 G_i_65 = G_i_64;
+                              }
+                           }
+                           G_i_66 = G_i_66 - 1;
+                        } while (G_i_66 >= 0);
+                     }
+                     I_d_64 = G_d_28;
+                     I_b_16 = true;
+                  }
+               }
+            }
+         }
+      }
+   }
+   G_i_67 = 0;
+   G_i_100 = LegacyOrdersTotal() - 1;
+   G_i_68 = G_i_100;
+   if (G_i_100 >= 0) {
+      do {
+         I_b_7 = LegacyOrderSelect(G_i_68, 0, 0);
+         if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+            if (LegacyOrderType() == LEGACY_OP_SELL || LegacyOrderType() == LEGACY_OP_BUY) {
+               G_i_67 = G_i_67 + 1;
+            }
+         }
+         G_i_68 = G_i_68 - 1;
+      } while (G_i_68 >= 0);
+   }
+   I_i_88 = G_i_67;
+   I_d_48 = 0;
+   L_d_12 = 0;
+   I_i_84 = LegacyOrdersTotal() - 1;
+   if (I_i_84 >= 0) {
+      do {
+         I_b_7 = LegacyOrderSelect(I_i_84, 0, 0);
+         if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+            if (LegacyOrderType() == LEGACY_OP_BUY || LegacyOrderType() == LEGACY_OP_SELL) {
+               G_d_78 = LegacyOrderOpenPrice();
+               I_d_48 = ((G_d_78 * LegacyOrderLots()) + I_d_48);
+               L_d_12 = (L_d_12 + LegacyOrderLots());
+            }
+         }
+         I_i_84 = I_i_84 - 1;
+      } while (I_i_84 >= 0);
+   }
+   if (I_i_88 > 0) {
+      I_d_48 = NormalizeDouble((I_d_48 / L_d_12), _Digits);
+   }
+   if (I_b_16) {
+      I_i_84 = LegacyOrdersTotal() - 1;
+      if (I_i_84 >= 0) {
+         do {
+            I_b_7 = LegacyOrderSelect(I_i_84, 0, 0);
+            if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+               if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_BUY) {
+                  I_d_80 = ((I_d_46 * _Point) + I_d_48);
+                  I_d_81 = I_d_80;
+                  G_d_78 = (I_d_82 * _Point);
+                  I_d_83 = (I_d_48 - G_d_78);
+                  I_b_17 = true;
+               }
+               if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71 && LegacyOrderType() == LEGACY_OP_SELL) {
+                  G_d_78 = (I_d_46 * _Point);
+                  I_d_80 = (I_d_48 - G_d_78);
+                  I_d_84 = I_d_80;
+                  I_d_83 = ((I_d_82 * _Point) + I_d_48);
+                  I_b_17 = true;
+               }
+            }
+            I_i_84 = I_i_84 - 1;
+         } while (I_i_84 >= 0);
+      }
+   }
+   if (I_b_16 == false) return 0;
+   G_i_100 = I_b_17;
+   if (G_i_100 != 1) return 0;
+   I_i_84 = LegacyOrdersTotal() - 1;
+   if (I_i_84 < 0) return 0;
+   do {
+      I_b_7 = LegacyOrderSelect(I_i_84, 0, 0);
+      if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+         if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+            I_b_7 = LegacyOrderModify(LegacyOrderTicket(), I_d_48, LegacyOrderStopLoss(), I_d_80, 0, 65535);
+         }
+         I_b_16 = false;
+      }
+      I_i_84 = I_i_84 - 1;
+   } while (I_i_84 >= 0);
+   L_i_15 = 0;
+   return L_i_15;
+}
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+int LegacyDeinit() {
+   int L_i_15;
+   L_i_15 = 0;
+   Comment("************");
+   L_i_15 = 0;
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+int f0_1(bool FuncArg_Boolean_00000000, bool FuncArg_Boolean_00000001) {
+   string S_s_20;
+   string S_s_21;
+   string S_s_22;
+   string S_s_23;
+   int L_i_15;
+   int L_i_11;
+   int L_i_12;
+   L_i_15 = 0;
+   L_i_11 = 0;
+   L_i_12 = 0;
+   G_d_2 = 0;
+   G_d_106 = 0;
+   L_i_11 = 0;
+   L_i_12 = LegacyOrdersTotal() - 1;
+   if (L_i_12 < 0) return L_i_11;
+   do {
+      if (LegacyOrderSelect(L_i_12, 0, 0) && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+         if (LegacyOrderType() == LEGACY_OP_BUY && FuncArg_Boolean_00000000) {
+            LegacyRefreshRates();
+            if (!LegacyIsTradeContextBusy()) {
+               if (!LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), NormalizeDouble(gBid, _Digits), 5, 4294967295)) {
+                  S_s_20 = (string)LegacyOrderTicket();
+                  S_s_20 = "Error close BUY " + S_s_20;
+                  Print(S_s_20);
+                  L_i_11 = -1;
+               }
+            } else {
+               G_l_22 = LegacyITime(NULL, 0, 0);
+               G_l_23 = I_i_131;
+               if (G_l_23 == G_l_22) {
+                  L_i_15 = -2;
+                  return L_i_15;
+               }
+               I_i_131 = (int)LegacyITime(NULL, 0, 0);
+               S_s_21 = (string)LegacyOrderTicket();
+               S_s_21 = "Need close BUY " + S_s_21;
+               S_s_21 = S_s_21 + ". Trade Context Busy";
+               Print(S_s_21);
+               L_i_15 = -2;
+               return L_i_15;
+            }
+         }
+         if (LegacyOrderType() == LEGACY_OP_SELL && FuncArg_Boolean_00000001) {
+            LegacyRefreshRates();
+            if (!LegacyIsTradeContextBusy()) {
+               if (!LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), NormalizeDouble(gAsk, _Digits), 5, 4294967295)) {
+                  S_s_22 = (string)LegacyOrderTicket();
+                  S_s_22 = "Error close SELL " + S_s_22;
+                  Print(S_s_22);
+                  L_i_11 = -1;
+               }
+            } else {
+               G_l_20 = LegacyITime(NULL, 0, 0);
+               G_l_21 = I_i_132;
+               if (G_l_21 == G_l_20) {
+                  L_i_15 = -2;
+                  return L_i_15;
+               }
+               I_i_132 = (int)LegacyITime(NULL, 0, 0);
+               S_s_23 = (string)LegacyOrderTicket();
+               S_s_23 = "Need close SELL " + S_s_23;
+               S_s_23 = S_s_23 + ". Trade Context Busy";
+               Print(S_s_23);
+               L_i_15 = -2;
+               return L_i_15;
+            }
+         }
+      }
+      L_i_12 = L_i_12 - 1;
+   } while (L_i_12 >= 0);
+   L_i_15 = L_i_11;
+   return L_i_15;
+}
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+int f0_15(int Fa_i_00, double Fa_d_01, double Fa_d_02, int Fa_i_03, double Fa_d_04, double Fa_d_05, int Fa_i_06, string Fa_s_07, int Fa_i_08, int Fa_i_09, int Fa_i_0A) {
+   int L_i_15;
+   int L_i_11;
+   int L_i_12;
+   int L_i_13;
+   int L_i_14;
+   L_i_15 = 0;
+   L_i_11 = 0;
+   L_i_12 = 0;
+   L_i_13 = 0;
+   L_i_14 = 0;
+   G_d_2 = 0;
+   G_d_106 = 0;
+   G_i_3 = 0;
+   G_d_3 = 0;
+   G_d_108 = 0;
+   G_i_5 = 0;
+   G_d_109 = 0;
+   G_d_110 = 0;
+   G_i_8 = 0;
+   G_d_111 = 0;
+   G_d_112 = 0;
+   G_i_11 = 0;
+   G_d_113 = 0;
+   G_d_114 = 0;
+   G_i_14 = 0;
+   G_d_115 = 0;
+   G_d_4 = 0;
+   G_i_16 = 0;
+   G_d_116 = 0;
+   G_d_117 = 0;
+   G_i_19 = 0;
+   G_d_118 = 0;
+   G_d_5 = 0;
+   G_i_21 = 0;
+   G_d_119 = 0;
+   G_d_120 = 0;
+   G_i_139 = 0;
+   G_d_121 = 0;
+   G_d_122 = 0;
+   G_i_26 = 0;
+   G_d_7 = 0;
+   G_d_123 = 0;
+   G_i_28 = 0;
+   G_d_124 = 0;
+   G_d_8 = 0;
+   G_i_30 = 0;
+   L_i_11 = 0;
+   L_i_12 = 0;
+   L_i_13 = 0;
+   L_i_14 = 100;
+   I_i_1 = Fa_i_00;
+   if (I_i_1 > 5) return L_i_11;
+   if (I_i_1 == 2) {
+      L_i_13 = 0;
+      if (L_i_14 <= 0) return L_i_11;
+      do {
+         G_i_31 = Fa_i_0A;
+         G_i_5 = Fa_i_06;
+         G_d_108 = Fa_d_02;
+         if (Fa_i_06 == 0) {
+            G_d_3 = 0;
+         } else {
+            G_d_3 = ((G_i_5 * _Point) + G_d_108);
+         }
+         G_i_3 = (int)I_d_82;
+         G_d_106 = Fa_d_04;
+         if (G_i_3 == 0) {
+            G_d_2 = 0;
+         } else {
+            G_d_10 = (G_i_3 * _Point);
+            G_d_2 = (G_d_106 - G_d_10);
+         }
+         L_i_11 = LegacyOrderSend(_Symbol, 2, Fa_d_01, Fa_d_02, Fa_i_03, G_d_2, G_d_3, Fa_s_07, Fa_i_08, Fa_i_09, G_i_31);
+         if (L_i_11 > 0) {
+            I_i_76 = I_i_76 + 1;
+         }
+         G_i_146 = LegacyGetLastError();
+         L_i_12 = G_i_146;
+         if (G_i_146 == 0) return L_i_11;
+         G_b_48 = (G_i_146 == 4);
+         if (G_b_48 != true) {
+            G_b_48 = (G_i_146 == 137);
+         }
+         if (G_b_48 != true) {
+            G_b_48 = (L_i_12 == 146);
+         }
+         if (G_b_48 != true) {
+            G_b_48 = (L_i_12 == 136);
+         }
+         if (G_b_48 == false) return L_i_11;
+         Sleep(1000);
+         L_i_13 = L_i_13 + 1;
+      } while (L_i_13 < L_i_14);
+      return L_i_11;
+   }
+   if (I_i_1 == 4) {
+      L_i_13 = 0;
+      if (L_i_14 <= 0) return L_i_11;
+      do {
+         G_i_33 = Fa_i_0A;
+         G_i_11 = Fa_i_06;
+         G_d_112 = Fa_d_02;
+         if (Fa_i_06 == 0) {
+            G_d_111 = 0;
+         } else {
+            G_d_111 = ((G_i_11 * _Point) + G_d_112);
+         }
+         G_i_8 = (int)I_d_82;
+         G_d_110 = Fa_d_04;
+         if (G_i_8 == 0) {
+            G_d_109 = 0;
+         } else {
+            G_d_128 = (G_i_8 * _Point);
+            G_d_109 = (G_d_110 - G_d_128);
+         }
+         L_i_11 = LegacyOrderSend(_Symbol, 4, Fa_d_01, Fa_d_02, Fa_i_03, G_d_109, G_d_111, Fa_s_07, Fa_i_08, Fa_i_09, G_i_33);
+         if (L_i_11 > 0) {
+            I_i_76 = I_i_76 + 1;
+         }
+         G_i_35 = LegacyGetLastError();
+         L_i_12 = (int)G_i_35;
+         if (G_i_35 == 0) return L_i_11;
+         G_b_45 = (G_i_35 == 4);
+         if (G_b_45 != true) {
+            G_b_45 = (G_i_35 == 137);
+         }
+         if (G_b_45 != true) {
+            G_b_45 = (L_i_12 == 146);
+         }
+         if (G_b_45 != true) {
+            G_b_45 = (L_i_12 == 136);
+         }
+         if (G_b_45 == false) return L_i_11;
+         Sleep(5000);
+         L_i_13 = L_i_13 + 1;
+      } while (L_i_13 < L_i_14);
+      return L_i_11;
+   }
+   if (I_i_1 == 0) {
+      L_i_13 = 0;
+      if (L_i_14 <= 0) return L_i_11;
+      do {
+         LegacyRefreshRates();
+         G_i_36 = Fa_i_0A;
+         G_i_16 = Fa_i_06;
+         G_d_4 = gAsk;
+         if (Fa_i_06 == 0) {
+            G_d_115 = 0;
+         } else {
+            G_d_115 = ((G_i_16 * _Point) + G_d_4);
+         }
+         G_i_14 = (int)I_d_82;
+         G_d_114 = gBid;
+         if (G_i_14 == 0) {
+            G_d_113 = 0;
+         } else {
+            G_d_13 = (G_i_14 * _Point);
+            G_d_113 = (G_d_114 - G_d_13);
+         }
+         L_i_11 = LegacyOrderSend(_Symbol, 0, Fa_d_01, gAsk, Fa_i_03, G_d_113, G_d_115, Fa_s_07, Fa_i_08, Fa_i_09, G_i_36);
+         if (L_i_11 > 0) {
+            I_i_76 = I_i_76 + 1;
+         }
+         G_i_143 = LegacyGetLastError();
+         L_i_12 = G_i_143;
+         if (G_i_143 == 0) return L_i_11;
+         G_b_46 = (G_i_143 == 4);
+         if (G_b_46 != true) {
+            G_b_46 = (G_i_143 == 137);
+         }
+         if (G_b_46 != true) {
+            G_b_46 = (L_i_12 == 146);
+         }
+         if (G_b_46 != true) {
+            G_b_46 = (L_i_12 == 136);
+         }
+         if (G_b_46 == false) return L_i_11;
+         Sleep(5000);
+         L_i_13 = L_i_13 + 1;
+      } while (L_i_13 < L_i_14);
+      return L_i_11;
+   }
+   if (I_i_1 == 3) {
+      L_i_13 = 0;
+      if (L_i_14 <= 0) return L_i_11;
+      do {
+         G_i_38 = Fa_i_0A;
+         G_i_21 = Fa_i_06;
+         G_d_5 = Fa_d_02;
+         if (Fa_i_06 == 0) {
+            G_d_118 = 0;
+         } else {
+            G_d_127 = (G_i_21 * _Point);
+            G_d_118 = (G_d_5 - G_d_127);
+         }
+         G_i_19 =(int) I_d_82;
+         G_d_117 = Fa_d_04;
+         if (G_i_19 == 0) {
+            G_d_116 = 0;
+         } else {
+            G_d_116 = ((G_i_19 * _Point) + G_d_117);
+         }
+         L_i_11 = LegacyOrderSend(_Symbol, 3, Fa_d_01, Fa_d_02, Fa_i_03, G_d_116, G_d_118, Fa_s_07, Fa_i_08, Fa_i_09, G_i_38);
+         if (L_i_11 > 0) {
+            I_i_76 = I_i_76 + 1;
+         }
+         G_i_40 = LegacyGetLastError();
+         L_i_12 = (int)G_i_40;
+         if (G_i_40 == 0) return L_i_11;
+         G_b_47 = (G_i_40 == 4);
+         if (G_b_47 != true) {
+            G_b_47 = (G_i_40 == 137);
+         }
+         if (G_b_47 != true) {
+            G_b_47 = (L_i_12 == 146);
+         }
+         if (G_b_47 != true) {
+            G_b_47 = (L_i_12 == 136);
+         }
+         if (G_b_47 == false) return L_i_11;
+         Sleep(5000);
+         L_i_13 = L_i_13 + 1;
+      } while (L_i_13 < L_i_14);
+      return L_i_11;
+   }
+   if (I_i_1 == 5) {
+      L_i_13 = 0;
+      if (L_i_14 <= 0) return L_i_11;
+      do {
+         G_i_41 = Fa_i_0A;
+         G_i_26 = Fa_i_06;
+         G_d_122 = Fa_d_02;
+         if (Fa_i_06 == 0) {
+            G_d_121 = 0;
+         } else {
+            G_d_126 = (G_i_26 * _Point);
+            G_d_121 = (G_d_122 - G_d_126);
+         }
+         G_i_139 = (int)I_d_82;
+         G_d_120 = Fa_d_04;
+         if (G_i_139 == 0) {
+            G_d_119 = 0;
+         } else {
+            G_d_119 = ((G_i_139 * _Point) + G_d_120);
+         }
+         L_i_11 = LegacyOrderSend(_Symbol, 5, Fa_d_01, Fa_d_02, Fa_i_03, G_d_119, G_d_121, Fa_s_07, Fa_i_08, Fa_i_09, G_i_41);
+         if (L_i_11 > 0) {
+            I_i_76 = I_i_76 + 1;
+         }
+         G_i_43 = LegacyGetLastError();
+         L_i_12 = G_i_43;
+         if (G_i_43 == 0) return L_i_11;
+         G_b_44 = (G_i_43 == 4);
+         if (G_b_44 != true) {
+            G_b_44 = (G_i_43 == 137);
+         }
+         if (G_b_44 != true) {
+            G_b_44 = (L_i_12 == 146);
+         }
+         if (G_b_44 != true) {
+            G_b_44 = (L_i_12 == 136);
+         }
+         if (G_b_44 == false) return L_i_11;
+         Sleep(5000);
+         L_i_13 = L_i_13 + 1;
+      } while (L_i_13 < L_i_14);
+      return L_i_11;
+   }
+   if (I_i_1 == 1) {
+      L_i_13 = 0;
+      if (L_i_14 <= 0) return L_i_11;
+      do {
+         G_i_44 = Fa_i_0A;
+         G_i_30 = Fa_i_06;
+         G_d_8 = gBid;
+         if (Fa_i_06 == 0) {
+            G_d_124 = 0;
+         } else {
+            G_d_125 = (G_i_30 * _Point);
+            G_d_124 = (G_d_8 - G_d_125);
+         }
+         G_i_28 = (int)I_d_82;
+         G_d_123 = gAsk;
+         if (G_i_28 == 0) {
+            G_d_7 = 0;
+         } else {
+            G_d_7 = ((G_i_28 * _Point) + G_d_123);
+         }
+         L_i_11 = LegacyOrderSend(_Symbol, 1, Fa_d_01, gBid, Fa_i_03, G_d_7, G_d_124, Fa_s_07, Fa_i_08, Fa_i_09, G_i_44);
+         if (L_i_11 > 0) {
+            I_i_76 = I_i_76 + 1;
+         }
+         G_i_46 = LegacyGetLastError();
+         L_i_12 = G_i_46;
+         if (G_i_46 == 0) return L_i_11;
+         G_b_0 = (G_i_46 == 4);
+         if (G_b_0 != true) {
+            G_b_0 = (G_i_46 == 137);
+         }
+         if (G_b_0 != true) {
+            G_b_0 = (L_i_12 == 146);
+         }
+         if (G_b_0 != true) {
+            G_b_0 = (L_i_12 == 136);
+         }
+         if (G_b_0 == false) return L_i_11;
+         Sleep(5000);
+         L_i_13 = L_i_13 + 1;
+      } while (L_i_13 < L_i_14);
+   }
+   L_i_15 = L_i_11;
+   return L_i_11;
+}
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void f0_18(int Fa_i_00, int Fa_i_01, double Fa_d_02) {
+   int L_i_15;
+   double L_d_13;
+   double L_d_14;
+   int L_i_16;
+   L_i_15 = 0;
+   L_d_13 = 0;
+   L_d_14 = 0;
+   L_i_16 = 0;
+   L_i_15 = 0;
+   L_d_13 = 0;
+   L_d_14 = 0;
+   if (Fa_i_01 == 0) return;
+   L_i_16 = LegacyOrdersTotal() - 1;
+   if (L_i_16 < 0) return;
+   do {
+      if (LegacyOrderSelect(L_i_16, 0, 0) && LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
+         if (LegacyOrderSymbol() == _Symbol || LegacyOrderMagicNumber() == I_i_71) {
+            if (LegacyOrderType() == LEGACY_OP_BUY) {
+               G_d_2 = (gBid - Fa_d_02);
+               L_i_15 = (int)NormalizeDouble((G_d_2 / _Point), 0);
+               if (L_i_15 < Fa_i_00) { L_i_16 = L_i_16 - 1; continue; }
+               returned_double = LegacyOrderStopLoss();
+               L_d_13 = returned_double;
+               G_d_2 = (Fa_i_01 * _Point);
+               L_d_14 = (gBid - G_d_2);
+               if (returned_double == 0 || (returned_double != 0 && L_d_14 > returned_double)) {
+                  I_b_7 = LegacyOrderModify(LegacyOrderTicket(), Fa_d_02, L_d_14, LegacyOrderTakeProfit(), 0, 16776960);
+               }
+            }
+            if (LegacyOrderType() == LEGACY_OP_SELL) {
+               G_d_106 = (Fa_d_02 - gAsk);
+               L_i_15 = (int)NormalizeDouble((G_d_106 / _Point), 0);
+               if (L_i_15 < Fa_i_00) { L_i_16 = L_i_16 - 1; continue; }
+               returned_double = LegacyOrderStopLoss();
+               L_d_13 = returned_double;
+               L_d_14 = ((Fa_i_01 * _Point) + gAsk);
+               if (returned_double == 0 || (returned_double != 0 && L_d_14 < returned_double)) {
+                  I_b_7 = LegacyOrderModify(LegacyOrderTicket(), Fa_d_02, L_d_14, LegacyOrderTakeProfit(), 0, 255);
+               }
+            }
+         }
+         Sleep(1000);
+      }
+      L_i_16 = L_i_16 - 1;
+   } while (L_i_16 >= 0);
+}
+
+
+//+------------------------------------------------------------------+
+
+
+//+------------------------------------------------------------------+
+//| Native MQL5 event handlers                                      |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   if(Require_Hedging_Account &&
+      (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+   {
+      Print("This EA requires an MT5 hedging account because the original strategy opens multiple positions per symbol.");
+      return INIT_FAILED;
+   }
+
+   if(!LegacyRefreshRates())
+      Print("Warning: initial market data is not available yet; the EA will refresh it on the first tick.");
+
+   if(Filter_Sideway || Filter_News || invisible_mode)
+      Print("Compatibility note: Filter_Sideway, Filter_News and invisible_mode are declared in the supplied source but have no executable implementation there; the MT5 port retains the inputs without inventing new behavior.");
+
+   int rc=LegacyInit();
+   // Source initializes this working magic later in start(); set it immediately so
+   // daily target and hidden basket TP operate on this EA's positions from tick one.
+   I_i_71=I_i_0;
+   gLegacyOpenHour=(Open_Hour==24 ? 0 : Open_Hour);
+   gLegacyCloseHour=(Close_Hour==24 ? 0 : Close_Hour);
+   return (rc==0 ? INIT_SUCCEEDED : INIT_FAILED);
+}
+
+void OnTick()
+{
+   if(!LegacyRefreshRates()) return;
+   I_i_71=I_i_0;
+   gLegacyOpenHour=(Open_Hour==24 ? 0 : Open_Hour);
+   gLegacyCloseHour=(Close_Hour==24 ? 0 : Close_Hour);
+   LegacyStart();
+}
+
+void OnDeinit(const int reason)
+{
+   LegacyDeinit();
+}
