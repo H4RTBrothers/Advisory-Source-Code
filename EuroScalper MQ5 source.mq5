@@ -5,11 +5,16 @@
 //+------------------------------------------------------------------+
 #property copyright "2023, lengockhanhhai - MQL5 conversion"
 #property link      "lengockhanhhai@gmail.com"
-#property version   "2.00"
+#property version   "2.11"
 #property description "Native MQL5 conversion of the supplied Euro Scalper NDD EA"
-#property description "Preserves legacy grid/averaging logic and fixes conversion-critical defects."
+#property description "Preserves legacy logic and adds a separate hedge using the original entry/grid rules."
 
 input bool Require_Hedging_Account = true;
+
+input group "=== Hedging System ==="
+input bool Use_Hedging_System = true;
+input int  Hedge_Magic_Offset = 50000000;
+
 
 //+------------------------------------------------------------------+
 //| MT4 compatibility helpers used by the converted Euro Scalper EA |
@@ -1066,6 +1071,314 @@ double G_d_128;
 int G_i_146;
 bool G_b_48;
 double returned_double;
+
+
+//+------------------------------------------------------------------+
+//| Hedge system: same ENTRY / GRID logic as the original EA         |
+//| - no immediate opposite pair                                     |
+//| - no recovery engine / staged unlock / basket trail              |
+//| - first hedge waits for the ORIGINAL entry signal to be opposite |
+//| - once opened, hedge averaging uses original Step/lot multiplier |
+//| - hedge TP uses original weighted-average TakeProfit logic        |
+//+------------------------------------------------------------------+
+long HedgeLogicMagic()
+{
+   long offset=(long)MathAbs(Hedge_Magic_Offset);
+   if(offset<=0) offset=50000000;
+   return (long)I_i_0+offset;
+}
+
+bool HedgeLogicTradeWindowAllowed()
+{
+   bool allowed=true;
+   int dow=LegacyDayOfWeek();
+   int hour=LegacyTimeHour(TimeCurrent());
+
+   if(!TradeOnThursday && dow==4) allowed=false;
+   if(TradeOnThursday && dow==4 && hour>Thursday_Hour) allowed=false;
+   if(!TradeOnFriday && dow==5) allowed=false;
+   if(TradeOnFriday && dow==5 && hour>Friday_Hour) allowed=false;
+
+   int openHour=(Open_Hour==24 ? 0 : Open_Hour);
+   int closeHour=(Close_Hour==24 ? 0 : Close_Hour);
+
+   if(openHour<closeHour)
+   {
+      if(hour<openHour || hour>=closeHour)
+         allowed=false;
+   }
+   else if(openHour>closeHour)
+   {
+      if(hour<openHour && hour>=closeHour)
+         allowed=false;
+   }
+
+   return allowed;
+}
+
+bool HedgeLogicDailyRangeAllowed()
+{
+   // This is the same branch used by the original first-entry logic.
+   if(OpenRangePips<=0.0 || MaxDailyRange<=0.0)
+      return true;
+
+   int bars=iBars(_Symbol,LegacyTimeframe(_Period));
+   if(bars<=0) return false;
+
+   int today=LegacyDayOfYear();
+   double dayOpen=0.0;
+
+   for(int shift=0;shift<bars;shift++)
+   {
+      datetime t=LegacyITime(_Symbol,_Period,shift);
+      if(t<=0) break;
+      if(LegacyTimeDayOfYear(t)!=today) break;
+      dayOpen=LegacyIOpen(_Symbol,_Period,shift);
+   }
+
+   if(dayOpen<=0.0) return false;
+
+   double upperEntry=NormalizeDouble(dayOpen+(OpenRangePips*_Point),_Digits);
+   double lowerEntry=NormalizeDouble(dayOpen-(OpenRangePips*_Point),_Digits);
+   double upperLimit=NormalizeDouble(upperEntry+(MaxDailyRange*_Point),_Digits);
+   double lowerLimit=NormalizeDouble(lowerEntry-(MaxDailyRange*_Point),_Digits);
+   double close0=gClose[0];
+
+   return ((close0>upperEntry && close0<upperLimit) ||
+           (close0<lowerEntry && close0>lowerLimit));
+}
+
+int HedgeLogicOriginalEntrySignal()
+{
+   // Exact original direction rule:
+   // Close[2] > Close[1] => BUY, otherwise SELL.
+   double close2=LegacyIClose(_Symbol,0,2);
+   double close1=LegacyIClose(_Symbol,0,1);
+   if(close2<=0.0 || close1<=0.0) return -1;
+   return (close2>close1 ? LEGACY_OP_BUY : LEGACY_OP_SELL);
+}
+
+void HedgeLogicCollectMagic(const long magic,
+                            int &buyCount,int &sellCount,
+                            double &buyVolume,double &sellVolume,
+                            double &buyWeighted,double &sellWeighted,
+                            double &latestBuyOpen,double &latestSellOpen,
+                            long &latestBuyTime,long &latestSellTime)
+{
+   buyCount=0;
+   sellCount=0;
+   buyVolume=0.0;
+   sellVolume=0.0;
+   buyWeighted=0.0;
+   sellWeighted=0.0;
+   latestBuyOpen=0.0;
+   latestSellOpen=0.0;
+   latestBuyTime=-1;
+   latestSellTime=-1;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=magic) continue;
+
+      long type=PositionGetInteger(POSITION_TYPE);
+      double volume=PositionGetDouble(POSITION_VOLUME);
+      double open=PositionGetDouble(POSITION_PRICE_OPEN);
+      long tmsc=PositionGetInteger(POSITION_TIME_MSC);
+
+      if(type==POSITION_TYPE_BUY)
+      {
+         buyCount++;
+         buyVolume+=volume;
+         buyWeighted+=(open*volume);
+         if(tmsc>=latestBuyTime)
+         {
+            latestBuyTime=tmsc;
+            latestBuyOpen=open;
+         }
+      }
+      else if(type==POSITION_TYPE_SELL)
+      {
+         sellCount++;
+         sellVolume+=volume;
+         sellWeighted+=(open*volume);
+         if(tmsc>=latestSellTime)
+         {
+            latestSellTime=tmsc;
+            latestSellOpen=open;
+         }
+      }
+   }
+}
+
+bool HedgeLogicOpen(const int cmd,const double requestedLot)
+{
+   long magic=HedgeLogicMagic();
+   double lot=LegacyNormalizeVolume(_Symbol,requestedLot);
+   if(lot<=0.0) return false;
+
+   string comment=_Symbol+"-Euro Scalper-HEDGE";
+   int result=LegacyOrderSend(_Symbol,
+                              cmd,
+                              lot,
+                              (cmd==LEGACY_OP_BUY ? gAsk : gBid),
+                              (int)I_d_34,
+                              0,
+                              0,
+                              comment,
+                              magic,
+                              0,
+                              (cmd==LEGACY_OP_BUY ? 65280 : 11823615));
+   if(result<0)
+   {
+      Print("Hedge entry error: ",LegacyGetLastError());
+      return false;
+   }
+   return true;
+}
+
+void HedgeLogicUpdateTP()
+{
+   long magic=HedgeLogicMagic();
+   int buyCount,sellCount;
+   double buyVolume,sellVolume,buyWeighted,sellWeighted;
+   double latestBuyOpen,latestSellOpen;
+   long latestBuyTime,latestSellTime;
+
+   HedgeLogicCollectMagic(magic,
+                          buyCount,sellCount,
+                          buyVolume,sellVolume,
+                          buyWeighted,sellWeighted,
+                          latestBuyOpen,latestSellOpen,
+                          latestBuyTime,latestSellTime);
+
+   double buyTP=0.0;
+   double sellTP=0.0;
+
+   if(buyVolume>0.0)
+   {
+      double avg=buyWeighted/buyVolume;
+      buyTP=NormalizeDouble(avg+(TakeProfit*_Point),_Digits);
+   }
+   if(sellVolume>0.0)
+   {
+      double avg=sellWeighted/sellVolume;
+      sellTP=NormalizeDouble(avg-(TakeProfit*_Point),_Digits);
+   }
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=magic) continue;
+
+      long type=PositionGetInteger(POSITION_TYPE);
+      double open=PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl=PositionGetDouble(POSITION_SL);
+      double target=(type==POSITION_TYPE_BUY ? buyTP : sellTP);
+
+      LegacyOrderModify((long)ticket,open,sl,target,0,0);
+   }
+}
+
+void HedgeLogicManage()
+{
+   if(!Use_Hedging_System) return;
+
+   // Primary basket = untouched original EA magic.
+   int pBuyCount,pSellCount;
+   double pBuyVolume,pSellVolume,pBuyWeighted,pSellWeighted;
+   double pLatestBuy,pLatestSell;
+   long pLatestBuyTime,pLatestSellTime;
+
+   HedgeLogicCollectMagic((long)I_i_0,
+                          pBuyCount,pSellCount,
+                          pBuyVolume,pSellVolume,
+                          pBuyWeighted,pSellWeighted,
+                          pLatestBuy,pLatestSell,
+                          pLatestBuyTime,pLatestSellTime);
+
+   long hedgeMagic=HedgeLogicMagic();
+
+   int hBuyCount,hSellCount;
+   double hBuyVolume,hSellVolume,hBuyWeighted,hSellWeighted;
+   double hLatestBuy,hLatestSell;
+   long hLatestBuyTime,hLatestSellTime;
+
+   HedgeLogicCollectMagic(hedgeMagic,
+                          hBuyCount,hSellCount,
+                          hBuyVolume,hSellVolume,
+                          hBuyWeighted,hSellWeighted,
+                          hLatestBuy,hLatestSell,
+                          hLatestBuyTime,hLatestSellTime);
+
+   int primaryCount=pBuyCount+pSellCount;
+   int hedgeCount=hBuyCount+hSellCount;
+
+   // Once a hedge basket has been started, it behaves like a second copy
+   // of the original one-direction grid: same Step, multiplier and TP.
+   if(hedgeCount>0)
+   {
+      // The supplied original strategy is one-direction-at-a-time.
+      if(hBuyCount>0 && hSellCount>0) return;
+
+      int hedgeDirection=(hBuyCount>0 ? LEGACY_OP_BUY : LEGACY_OP_SELL);
+
+      HedgeLogicUpdateTP();
+
+      // Original averaging behavior: same direction, adverse Step,
+      // and (because the supplied source has I_b_20=true) only at
+      // the very beginning of the current bar.
+      if(hedgeCount>=MaxTrades) return;
+      if(gVolume[0]>=5) return;
+
+      bool add=false;
+      if(hedgeDirection==LEGACY_OP_BUY)
+      {
+         if((hLatestBuy-gAsk)>=(Step*_Point))
+            add=true;
+      }
+      else
+      {
+         if((gBid-hLatestSell)>=(Step*_Point))
+            add=true;
+      }
+
+      if(!add) return;
+
+      // Same lot progression used by the supplied original multiplier mode.
+      double nextLot=Lot*MathPow(LotMultiplikator,hedgeCount);
+      if(HedgeLogicOpen(hedgeDirection,nextLot))
+         HedgeLogicUpdateTP();
+
+      return;
+   }
+
+   // No hedge basket exists: only then use the active original basket
+   // to define what "opposite" means.
+   if(primaryCount<=0) return;
+
+   // The supplied original strategy is one-direction-at-a-time.
+   if(pBuyCount>0 && pSellCount>0) return;
+
+   int primaryDirection=(pBuyCount>0 ? LEGACY_OP_BUY : LEGACY_OP_SELL);
+   int requiredHedgeDirection=(primaryDirection==LEGACY_OP_BUY ? LEGACY_OP_SELL : LEGACY_OP_BUY);
+
+   // Use the ORIGINAL first-entry filters and ORIGINAL direction signal.
+   if(!HedgeLogicTradeWindowAllowed()) return;
+   if(!HedgeLogicDailyRangeAllowed()) return;
+
+   // The hedge is not automatic. It is created only when the same
+   // original entry rule gives the opposite signal.
+   int signal=HedgeLogicOriginalEntrySignal();
+   if(signal!=requiredHedgeDirection) return;
+
+   if(HedgeLogicOpen(requiredHedgeDirection,Lot))
+      HedgeLogicUpdateTP();
+}
 
 
 //+------------------------------------------------------------------+
@@ -3135,6 +3448,7 @@ void OnTick()
    gLegacyOpenHour=(Open_Hour==24 ? 0 : Open_Hour);
    gLegacyCloseHour=(Close_Hour==24 ? 0 : Close_Hour);
    LegacyStart();
+   HedgeLogicManage();
 }
 
 void OnDeinit(const int reason)
