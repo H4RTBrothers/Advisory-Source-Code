@@ -1,13 +1,13 @@
 //+------------------------------------------------------------------+
-//| Euro Scalper NDD - MQL5 conversion                              |
+//| Sea Anchor Crew - MQL5 conversion                              |
 //| Converted from user-supplied MT4 source.                        |
 //| IMPORTANT: This strategy expects a hedging account.             |
 //+------------------------------------------------------------------+
 #property copyright "2023, lengockhanhhai - MQL5 conversion"
 #property link      "lengockhanhhai@gmail.com"
-#property version   "2.11"
-#property description "Native MQL5 conversion of the supplied Euro Scalper NDD EA"
-#property description "Preserves legacy logic and adds a separate hedge using the original entry/grid rules."
+#property version   "2.25"
+#property description "Sea Anchor Crew native MQL5 conversion"
+#property description "Legacy entry/grid hedge + 3-stage DD timeframe, news/session filters and configurable daily target."
 
 input bool Require_Hedging_Account = true;
 
@@ -15,6 +15,88 @@ input group "=== Hedging System ==="
 input bool Use_Hedging_System = true;
 input int  Hedge_Magic_Offset = 50000000;
 
+enum ENUM_DAILY_TARGET_MODE
+{
+   DAILY_TARGET_MONEY = 0,
+   DAILY_TARGET_PERCENT = 1
+};
+
+enum ENUM_NEWS_CURRENCY_MODE
+{
+   NEWS_CURRENCY_AUTO_SYMBOL = 0,
+   NEWS_CURRENCY_MANUAL = 1
+};
+
+enum ENUM_SESSION_TIME_SOURCE
+{
+   SESSION_SERVER_TIME = 0,
+   SESSION_GMT_TIME = 1,
+   SESSION_LOCAL_PC_TIME = 2
+};
+
+input group "=== Timeframe Switch on Drawdown - 3 Stages ==="
+input bool            Use_DrawdownSwitch        = true;
+input double          DD_Stage1_Pct             = 20.0;
+input double          DD_Stage2_Pct             = 30.0;
+input double          DD_Stage3_Pct             = 40.0;
+input ENUM_TIMEFRAMES Timeframe_Low             = PERIOD_CURRENT;
+input ENUM_TIMEFRAMES Timeframe_Stage1          = PERIOD_M15;
+input ENUM_TIMEFRAMES Timeframe_Stage2          = PERIOD_M30;
+input ENUM_TIMEFRAMES Timeframe_Stage3          = PERIOD_H1;
+input bool            Auto_Switch_Back          = true;
+input double          DD_SwitchBack_Buffer_Pct  = 2.0;
+
+input group "=== News Filter - MT5 Economic Calendar ==="
+input bool                    Filter_News                    = true;
+input ENUM_NEWS_CURRENCY_MODE News_Currency_Mode             = NEWS_CURRENCY_AUTO_SYMBOL;
+input string                  News_Manual_Currencies         = "USD,EUR";
+input bool                    News_Filter_High               = true;
+input bool                    News_Filter_Medium             = true;
+input bool                    News_Filter_Low                = false;
+input int                     News_High_Minutes_Before       = 60;
+input int                     News_High_Minutes_After        = 30;
+input int                     News_Medium_Minutes_Before     = 30;
+input int                     News_Medium_Minutes_After      = 15;
+input int                     News_Low_Minutes_Before        = 15;
+input int                     News_Low_Minutes_After         = 5;
+input int                     News_Refresh_Seconds           = 30;
+input bool                    News_Stop_New_Trades           = true;
+input bool                    News_Close_Managed_Trades      = true;
+input bool                    News_Delete_Managed_Pending    = true;
+input bool                    News_Close_Only_Profit         = false;
+input double                  News_Min_Profit_To_Close       = 1.0;
+input bool                    News_Close_All_Charts          = false;
+input bool                    News_Fail_Open_On_Error        = true;
+
+input group "=== Session Filter ==="
+input bool                    Use_Session_Filter             = false;
+input ENUM_SESSION_TIME_SOURCE Session_Time_Source           = SESSION_SERVER_TIME;
+input int                     Session_Time_Offset_Minutes    = 0;
+input bool                    Session_Monday                 = true;
+input bool                    Session_Tuesday                = true;
+input bool                    Session_Wednesday              = true;
+input bool                    Session_Thursday               = true;
+input bool                    Session_Friday                 = true;
+input bool                    Session_Saturday               = false;
+input bool                    Session_Sunday                 = false;
+input bool                    Use_Asia_Session               = true;
+input int                     Asia_Start_Hour                = 0;
+input int                     Asia_Start_Minute              = 0;
+input int                     Asia_End_Hour                  = 9;
+input int                     Asia_End_Minute                = 0;
+input bool                    Use_London_Session             = true;
+input int                     London_Start_Hour              = 7;
+input int                     London_Start_Minute            = 0;
+input int                     London_End_Hour                = 16;
+input int                     London_End_Minute              = 0;
+input bool                    Use_NewYork_Session            = true;
+input int                     NewYork_Start_Hour             = 12;
+input int                     NewYork_Start_Minute           = 0;
+input int                     NewYork_End_Hour               = 21;
+input int                     NewYork_End_Minute             = 0;
+input bool                    Session_Finish_Active_Basket   = true; // Session ends: continue current basket normally; OFF only after basket is clear
+input bool                    Session_Close_Basket_On_Profit  = true; // Only after allowed session has ended
+input double                  Session_Basket_Close_Profit     = 1.00; // account currency, primary + hedge combined
 
 //+------------------------------------------------------------------+
 //| MT4 compatibility helpers used by the converted Euro Scalper EA |
@@ -56,6 +138,34 @@ long     gVolume[1];
 int      gBars=0;
 int      gLegacyOpenHour=0;
 int      gLegacyCloseHour=23;
+
+// Feature state
+ENUM_TIMEFRAMES gActiveEntryTimeframe=PERIOD_CURRENT;
+double   gDDPeakEquity=0.0;
+double   gCurrentDDPct=0.0;
+int      gDDStage=0;
+
+bool     gSessionAllowed=true;
+string   gSessionStatus="SESSION: OFF";
+bool     gSessionFinishBasket=false;
+
+bool     gNewsBlocked=false;
+bool     gNewsWasBlocked=false;
+datetime gNewsLastCheck=0;
+datetime gNewsNearestTime=0;
+ulong    gNewsNearestValueId=0;
+string   gNewsNearestName="";
+string   gNewsNearestCurrency="";
+string   gNewsStatus="NEWS: READY";
+
+bool     gBlockNewEntries=false;
+string   gFeatureStatus="";
+
+int      gDailyTargetDay=-1;
+bool     gDailyTargetHandled=false;
+bool     gDailyTargetTradeBlocked=false;
+double   gDailyTargetStartBalance=0.0;
+double   gDailyTargetLastProfit=0.0;
 
 int LegacyGetLastError()
 {
@@ -162,10 +272,11 @@ bool LegacyRefreshRates()
    }
    gBid=tick.bid;
    gAsk=tick.ask;
-   gTime[0]=iTime(_Symbol,_Period,0);
-   gClose[0]=iClose(_Symbol,_Period,0);
-   gVolume[0]=(long)iVolume(_Symbol,_Period,0);
-   gBars=Bars(_Symbol,_Period);
+   ENUM_TIMEFRAMES active_tf=LegacyTimeframe(0);
+   gTime[0]=iTime(_Symbol,active_tf,0);
+   gClose[0]=iClose(_Symbol,active_tf,0);
+   gVolume[0]=(long)iVolume(_Symbol,active_tf,0);
+   gBars=Bars(_Symbol,active_tf);
    return true;
 }
 
@@ -202,7 +313,8 @@ int LegacyDayOfWeek()
 
 ENUM_TIMEFRAMES LegacyTimeframe(const int timeframe)
 {
-   if(timeframe==0) return _Period;
+   if(timeframe==0)
+      return (gActiveEntryTimeframe==PERIOD_CURRENT ? _Period : gActiveEntryTimeframe);
    switch(timeframe)
    {
       case 1:     return PERIOD_M1;
@@ -576,14 +688,33 @@ bool LegacyOrderModify(const long ticket,const double price,const double sl,cons
    if(PositionSelectByTicket(t))
    {
       string symbol=PositionGetString(POSITION_SYMBOL);
+
+      // Skip an MT5 modify request when SL/TP are already unchanged.
+      // This avoids TRADE_RETCODE_NO_CHANGES (10025) journal noise.
+      double requested_sl=LegacyNormalizePrice(symbol,sl);
+      double requested_tp=LegacyNormalizePrice(symbol,tp);
+      double current_sl=LegacyNormalizePrice(symbol,PositionGetDouble(POSITION_SL));
+      double current_tp=LegacyNormalizePrice(symbol,PositionGetDouble(POSITION_TP));
+      double tick_size=SymbolInfoDouble(symbol,SYMBOL_TRADE_TICK_SIZE);
+      if(tick_size<=0.0) tick_size=SymbolInfoDouble(symbol,SYMBOL_POINT);
+      if(tick_size<=0.0) tick_size=_Point;
+      double tolerance=tick_size*0.5;
+
+      if(MathAbs(current_sl-requested_sl)<=tolerance &&
+         MathAbs(current_tp-requested_tp)<=tolerance)
+      {
+         LegacySetError(0);
+         return true;
+      }
+
       MqlTradeRequest request={};
       MqlTradeResult  result={};
       request.action=TRADE_ACTION_SLTP;
       request.position=t;
       request.symbol=symbol;
       request.magic=(ulong)PositionGetInteger(POSITION_MAGIC);
-      request.sl=LegacyNormalizePrice(symbol,sl);
-      request.tp=LegacyNormalizePrice(symbol,tp);
+      request.sl=requested_sl;
+      request.tp=requested_tp;
 
       ResetLastError();
       bool sent=OrderSend(request,result);
@@ -787,8 +918,14 @@ bool LegacyObjectSetText(const string name,const string text,const int font_size
 input string Minimal_Deposit = "$200";
 input string Time_Frame = "Time Frame M1";
 input string Pairs = "EurUsd";
+input group "=== Daily Target Behavior ==="
 input bool Use_Daily_Target = true;
-input double Daily_Target = 100;
+input ENUM_DAILY_TARGET_MODE Daily_Target_Mode = DAILY_TARGET_MONEY;
+input double Daily_Target = 100;          // account currency when mode = MONEY
+input double Daily_Target_Percent = 10.0; // % of balance captured at the start of the trading day
+input bool Close_Managed_Trades_At_Daily_Target = true;
+input bool Stop_Trading_After_Daily_Target = false; // false = close once, then allow new trading
+
 input bool Hidden_TP = true;
 input double Hiden_TP = 500;
 input double Lot = 0.01;
@@ -806,7 +943,6 @@ input int Thursday_Hour = 12;
 input bool TradeOnFriday = true;
 input int Friday_Hour = 20;
 input bool Filter_Sideway = true; // Retained from source; original code contains no active implementation.
-input bool Filter_News = true;    // Retained from source; original code contains no active implementation.
 input bool invisible_mode = true; // Retained from source; original code contains no active implementation.
 input double OpenRangePips = 1;
 input double MaxDailyRange = 20000;
@@ -1074,6 +1210,34 @@ double returned_double;
 
 
 //+------------------------------------------------------------------+
+//| One shared multiplier ladder for PRIMARY and HEDGE baskets       |
+//| count is zero-based: 0=first trade, 1=second trade, ...          |
+//+------------------------------------------------------------------+
+double SACMultiplierLot(const int count)
+{
+   int n=MathMax(count,0);
+   double raw=Lot*MathPow(LotMultiplikator,n);
+
+   double vmin=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double vmax=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+
+   if(step<=0.0)
+      step=(vmin>0.0 ? vmin : 0.01);
+
+   // Use nearest broker lot step so, for example, Lot=0.01 and
+   // multiplier=1.21 produces:
+   // 0.01, 0.01, 0.01, 0.02, 0.02, ...
+   double volume=MathRound(raw/step)*step;
+
+   if(vmin>0.0 && volume<vmin) volume=vmin;
+   if(vmax>0.0 && volume>vmax) volume=vmax;
+
+   return NormalizeDouble(volume,LegacyVolumeDigits(_Symbol));
+}
+
+
+//+------------------------------------------------------------------+
 //| Hedge system: same ENTRY / GRID logic as the original EA         |
 //| - no immediate opposite pair                                     |
 //| - no recovery engine / staged unlock / basket trail              |
@@ -1086,6 +1250,771 @@ long HedgeLogicMagic()
    long offset=(long)MathAbs(Hedge_Magic_Offset);
    if(offset<=0) offset=50000000;
    return (long)I_i_0+offset;
+}
+
+bool FeatureIsManagedMagic(const long magic)
+{
+   return (magic==(long)I_i_0 || magic==HedgeLogicMagic());
+}
+
+datetime FeatureSessionClock()
+{
+   datetime t=TimeTradeServer();
+   if(Session_Time_Source==SESSION_GMT_TIME)
+      t=TimeGMT();
+   else if(Session_Time_Source==SESSION_LOCAL_PC_TIME)
+      t=TimeLocal();
+
+   return (datetime)(t + Session_Time_Offset_Minutes*60);
+}
+
+bool FeatureDayEnabled(const int dow)
+{
+   if(dow==0) return Session_Sunday;
+   if(dow==1) return Session_Monday;
+   if(dow==2) return Session_Tuesday;
+   if(dow==3) return Session_Wednesday;
+   if(dow==4) return Session_Thursday;
+   if(dow==5) return Session_Friday;
+   if(dow==6) return Session_Saturday;
+   return false;
+}
+
+bool FeatureMinuteWindow(const int nowMin,const int startMin,const int endMin)
+{
+   if(startMin==endMin) return true; // 24-hour window
+   if(startMin<endMin) return (nowMin>=startMin && nowMin<endMin);
+   return (nowMin>=startMin || nowMin<endMin); // overnight window
+}
+
+int FeatureManagedTradeCount()
+{
+   int count=0;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+
+      long magic=PositionGetInteger(POSITION_MAGIC);
+      if(!FeatureIsManagedMagic(magic)) continue;
+
+      count++;
+   }
+
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+
+      long magic=OrderGetInteger(ORDER_MAGIC);
+      if(!FeatureIsManagedMagic(magic)) continue;
+
+      count++;
+   }
+
+   return count;
+}
+
+double FeatureManagedFloatingNet()
+{
+   double total=0.0;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+
+      long magic=PositionGetInteger(POSITION_MAGIC);
+      if(!FeatureIsManagedMagic(magic)) continue;
+
+      total += PositionGetDouble(POSITION_PROFIT);
+      total += PositionGetDouble(POSITION_SWAP);
+   }
+
+   return total;
+}
+
+void FeatureClearManagedBasket()
+{
+   // Delete managed pending orders first so none can activate while positions
+   // are being closed.
+   FeatureDeleteManagedPendingOrders();
+
+   // Close both the legacy primary magic and the hedge magic on this symbol.
+   FeatureCloseManagedPositions(false,0.0);
+}
+
+void FeatureManageSessionFinishBasket()
+{
+   if(!Use_Session_Filter) return;
+   if(!Session_Finish_Active_Basket) return;
+   if(!gSessionFinishBasket) return;
+   if(!Session_Close_Basket_On_Profit) return;
+
+   int managed=FeatureManagedTradeCount();
+   if(managed<=0)
+   {
+      gSessionFinishBasket=false;
+      return;
+   }
+
+   double floating=FeatureManagedFloatingNet();
+   double target=MathMax(Session_Basket_Close_Profit,0.0);
+
+   // After the normal session has ended, let the original strategy continue
+   // until the entire managed basket has recovered to the requested net profit.
+   if(floating>=target)
+   {
+      Print("Session finish-basket profit target reached. floating=",
+            DoubleToString(floating,2),
+            " target=",DoubleToString(target,2),
+            ". Closing managed basket.");
+
+      FeatureClearManagedBasket();
+   }
+}
+
+bool FeatureSessionOutsideAllowed(const string reason)
+{
+   if(!Session_Finish_Active_Basket)
+   {
+      gSessionFinishBasket=false;
+      gSessionStatus=reason;
+      return false;
+   }
+
+   int managed=FeatureManagedTradeCount();
+
+   // If the trading session has ended while a basket is active,
+   // keep the EA fully active for that basket. This preserves the
+   // original grid/hedge behavior until every managed trade/order clears.
+   if(managed>0)
+   {
+      gSessionFinishBasket=true;
+
+      if(Session_Close_Basket_On_Profit)
+      {
+         double floating=FeatureManagedFloatingNet();
+         gSessionStatus="SESSION: FINISH BASKET ("+IntegerToString(managed)+") "
+                       +DoubleToString(floating,2)+"/"
+                       +DoubleToString(MathMax(Session_Basket_Close_Profit,0.0),2);
+      }
+      else
+         gSessionStatus="SESSION: FINISH BASKET ("+IntegerToString(managed)+")";
+
+      return true;
+   }
+
+   // Basket is now completely clear. Do not start a new basket outside
+   // the configured session. Wait for the next allowed session.
+   gSessionFinishBasket=false;
+   gSessionStatus="SESSION: OFF";
+   return false;
+}
+
+bool FeatureSessionAllowedNow()
+{
+   if(!Use_Session_Filter)
+   {
+      gSessionFinishBasket=false;
+      gSessionStatus="SESSION: OFF";
+      return true;
+   }
+
+   datetime t=FeatureSessionClock();
+   MqlDateTime dt={};
+   if(!TimeToStruct(t,dt))
+   {
+      gSessionStatus="SESSION: TIME ERROR";
+      return false;
+   }
+
+   if(!FeatureDayEnabled(dt.day_of_week))
+      return FeatureSessionOutsideAllowed("SESSION: DAY BLOCKED");
+
+   bool anyEnabled=(Use_Asia_Session || Use_London_Session || Use_NewYork_Session);
+   if(!anyEnabled)
+   {
+      gSessionFinishBasket=false;
+      gSessionStatus="SESSION: ALL HOURS";
+      return true;
+   }
+
+   int nowMin=dt.hour*60+dt.min;
+   bool asia=false,london=false,newyork=false;
+
+   if(Use_Asia_Session)
+      asia=FeatureMinuteWindow(nowMin,
+                              Asia_Start_Hour*60+Asia_Start_Minute,
+                              Asia_End_Hour*60+Asia_End_Minute);
+   if(Use_London_Session)
+      london=FeatureMinuteWindow(nowMin,
+                                London_Start_Hour*60+London_Start_Minute,
+                                London_End_Hour*60+London_End_Minute);
+   if(Use_NewYork_Session)
+      newyork=FeatureMinuteWindow(nowMin,
+                                 NewYork_Start_Hour*60+NewYork_Start_Minute,
+                                 NewYork_End_Hour*60+NewYork_End_Minute);
+
+   if(asia)
+   {
+      gSessionFinishBasket=false;
+      gSessionStatus="SESSION: ASIA";
+      return true;
+   }
+   if(london)
+   {
+      gSessionFinishBasket=false;
+      gSessionStatus="SESSION: LONDON";
+      return true;
+   }
+   if(newyork)
+   {
+      gSessionFinishBasket=false;
+      gSessionStatus="SESSION: NEW YORK";
+      return true;
+   }
+
+   return FeatureSessionOutsideAllowed("SESSION: OUTSIDE");
+}
+
+int FeatureIntMax(const int a,const int b)
+{
+   return (a>b ? a : b);
+}
+
+int FeatureBeforeMinutes(const ENUM_CALENDAR_EVENT_IMPORTANCE importance)
+{
+   if(importance==CALENDAR_IMPORTANCE_HIGH)     return FeatureIntMax(News_High_Minutes_Before,0);
+   if(importance==CALENDAR_IMPORTANCE_MODERATE) return FeatureIntMax(News_Medium_Minutes_Before,0);
+   if(importance==CALENDAR_IMPORTANCE_LOW)      return FeatureIntMax(News_Low_Minutes_Before,0);
+   return 0;
+}
+
+int FeatureAfterMinutes(const ENUM_CALENDAR_EVENT_IMPORTANCE importance)
+{
+   if(importance==CALENDAR_IMPORTANCE_HIGH)     return FeatureIntMax(News_High_Minutes_After,0);
+   if(importance==CALENDAR_IMPORTANCE_MODERATE) return FeatureIntMax(News_Medium_Minutes_After,0);
+   if(importance==CALENDAR_IMPORTANCE_LOW)      return FeatureIntMax(News_Low_Minutes_After,0);
+   return 0;
+}
+
+bool FeatureImportanceEnabled(const ENUM_CALENDAR_EVENT_IMPORTANCE importance)
+{
+   if(importance==CALENDAR_IMPORTANCE_HIGH)      return News_Filter_High;
+   if(importance==CALENDAR_IMPORTANCE_MODERATE)  return News_Filter_Medium;
+   if(importance==CALENDAR_IMPORTANCE_LOW)       return News_Filter_Low;
+   return false;
+}
+
+int FeatureMaxNewsBefore()
+{
+   int m=0;
+   if(News_Filter_High)   m=FeatureIntMax(m,FeatureIntMax(News_High_Minutes_Before,0));
+   if(News_Filter_Medium) m=FeatureIntMax(m,FeatureIntMax(News_Medium_Minutes_Before,0));
+   if(News_Filter_Low)    m=FeatureIntMax(m,FeatureIntMax(News_Low_Minutes_Before,0));
+   return m;
+}
+
+int FeatureMaxNewsAfter()
+{
+   int m=0;
+   if(News_Filter_High)   m=FeatureIntMax(m,FeatureIntMax(News_High_Minutes_After,0));
+   if(News_Filter_Medium) m=FeatureIntMax(m,FeatureIntMax(News_Medium_Minutes_After,0));
+   if(News_Filter_Low)    m=FeatureIntMax(m,FeatureIntMax(News_Low_Minutes_After,0));
+   return m;
+}
+
+bool FeatureEvaluateNewsCurrency(const string currency,
+                                 const datetime now,
+                                 bool &calendarError,
+                                 datetime &bestTime,
+                                 ulong &bestValueId,
+                                 string &bestName,
+                                 string &bestCurrency)
+{
+   if(currency=="") return false;
+
+   int maxBefore=FeatureMaxNewsBefore();
+   int maxAfter=FeatureMaxNewsAfter();
+   datetime from=now-(maxAfter+1)*60;
+   datetime to=now+(maxBefore+1)*60;
+
+   MqlCalendarValue values[];
+   ResetLastError();
+   int count=CalendarValueHistory(values,from,to,"",currency);
+   if(count<0)
+   {
+      calendarError=true;
+      return false;
+   }
+
+   bool blocked=false;
+   double bestDistance=DBL_MAX;
+
+   for(int i=0;i<count;i++)
+   {
+      MqlCalendarEvent event;
+      if(!CalendarEventById(values[i].event_id,event))
+         continue;
+      if(!FeatureImportanceEnabled(event.importance))
+         continue;
+
+      int before=FeatureBeforeMinutes(event.importance);
+      int after=FeatureAfterMinutes(event.importance);
+      long delta=(long)(values[i].time-now);
+
+      bool inWindow=false;
+      if(delta>=0 && delta<=before*60)
+         inWindow=true;
+      else if(delta<0 && (-delta)<=after*60)
+         inWindow=true;
+
+      if(!inWindow) continue;
+      blocked=true;
+
+      double distance=MathAbs((double)delta);
+      if(distance<bestDistance)
+      {
+         bestDistance=distance;
+         bestTime=values[i].time;
+         bestValueId=values[i].id;
+         bestName=event.name;
+         bestCurrency=currency;
+      }
+   }
+
+   return blocked;
+}
+
+void FeatureCloseManagedPositions(const bool profitOnly,const double minProfit)
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      long magic=PositionGetInteger(POSITION_MAGIC);
+      if(!FeatureIsManagedMagic(magic)) continue;
+
+      double profit=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+      if(profitOnly && profit<minProfit) continue;
+
+      double volume=PositionGetDouble(POSITION_VOLUME);
+      LegacyOrderClose((long)ticket,volume,0.0,(int)I_d_34,0);
+   }
+}
+
+void FeatureDeleteManagedPendingOrders()
+{
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      long magic=OrderGetInteger(ORDER_MAGIC);
+      if(!FeatureIsManagedMagic(magic)) continue;
+
+      MqlTradeRequest request={};
+      MqlTradeResult result={};
+      request.action=TRADE_ACTION_REMOVE;
+      request.order=ticket;
+      request.symbol=_Symbol;
+      request.magic=(ulong)magic;
+      ResetLastError();
+      if(!OrderSend(request,result) || !LegacyTradeRetcodeOK(result.retcode))
+         PrintFormat("News pending delete failed. ticket=%I64u retcode=%u comment=%s",
+                     ticket,result.retcode,result.comment);
+   }
+}
+
+void FeatureCloseAllCharts()
+{
+   long current=ChartID();
+   long id=ChartFirst();
+
+   // Close other charts first.
+   while(id>=0)
+   {
+      long next=ChartNext(id);
+      if(id!=current)
+         ChartClose(id);
+      id=next;
+   }
+
+   // Current chart is last because closing it detaches this EA.
+   ChartClose(current);
+}
+
+void FeatureApplyNewsOrderManagement()
+{
+   if(News_Close_Managed_Trades)
+      FeatureCloseManagedPositions(News_Close_Only_Profit,News_Min_Profit_To_Close);
+
+   if(News_Delete_Managed_Pending)
+      FeatureDeleteManagedPendingOrders();
+
+   if(News_Close_All_Charts)
+      FeatureCloseAllCharts();
+}
+
+void FeatureUpdateNews()
+{
+   if(!Filter_News)
+   {
+      gNewsBlocked=false;
+      gNewsStatus="NEWS: OFF";
+      gNewsWasBlocked=false;
+      return;
+   }
+
+   datetime now=TimeTradeServer();
+   if(now<=0) now=TimeCurrent();
+
+   int refresh=FeatureIntMax(News_Refresh_Seconds,1);
+   if(gNewsLastCheck>0 && now-gNewsLastCheck<refresh)
+      return;
+
+   gNewsLastCheck=now;
+   bool calendarError=false;
+   bool blocked=false;
+   datetime bestTime=0;
+   ulong bestValueId=0;
+   string bestName="";
+   string bestCurrency="";
+
+   if(News_Currency_Mode==NEWS_CURRENCY_AUTO_SYMBOL)
+   {
+      string base=SymbolInfoString(_Symbol,SYMBOL_CURRENCY_BASE);
+      string profit=SymbolInfoString(_Symbol,SYMBOL_CURRENCY_PROFIT);
+
+      if(base!="")
+         blocked |= FeatureEvaluateNewsCurrency(base,now,calendarError,bestTime,bestValueId,bestName,bestCurrency);
+
+      if(profit!="" && profit!=base)
+      {
+         datetime t2=0;
+         ulong id2=0;
+         string n2="",c2="";
+         bool b2=FeatureEvaluateNewsCurrency(profit,now,calendarError,t2,id2,n2,c2);
+         if(b2)
+         {
+            if(!blocked || MathAbs((double)(t2-now))<MathAbs((double)(bestTime-now)))
+            {
+               bestTime=t2;
+               bestValueId=id2;
+               bestName=n2;
+               bestCurrency=c2;
+            }
+            blocked=true;
+         }
+      }
+   }
+   else
+   {
+      string items[];
+      ushort sep=(ushort)StringGetCharacter(",",0);
+      int n=StringSplit(News_Manual_Currencies,sep,items);
+      for(int i=0;i<n;i++)
+      {
+         string cur=items[i];
+         StringTrimLeft(cur);
+         StringTrimRight(cur);
+         StringToUpper(cur);
+         if(cur=="") continue;
+
+         datetime tx=0;
+         ulong idx=0;
+         string nx="",cx="";
+         bool bx=FeatureEvaluateNewsCurrency(cur,now,calendarError,tx,idx,nx,cx);
+         if(bx)
+         {
+            if(!blocked || MathAbs((double)(tx-now))<MathAbs((double)(bestTime-now)))
+            {
+               bestTime=tx;
+               bestValueId=idx;
+               bestName=nx;
+               bestCurrency=cx;
+            }
+            blocked=true;
+         }
+      }
+   }
+
+   if(calendarError && !News_Fail_Open_On_Error)
+      blocked=true;
+
+   gNewsBlocked=blocked;
+   gNewsNearestTime=bestTime;
+   gNewsNearestValueId=bestValueId;
+   gNewsNearestName=bestName;
+   gNewsNearestCurrency=bestCurrency;
+
+   if(calendarError && !blocked)
+      gNewsStatus=(News_Fail_Open_On_Error ? "NEWS: CALENDAR ERROR / FAIL OPEN"
+                                          : "NEWS: CALENDAR ERROR / BLOCK");
+   else if(blocked)
+   {
+      string when=(bestTime>0 ? TimeToString(bestTime,TIME_DATE|TIME_MINUTES) : "calendar error");
+      string name=(bestName!="" ? bestName : "calendar unavailable");
+      gNewsStatus="NEWS BLOCK: "+bestCurrency+" "+name+" @ "+when;
+   }
+   else
+      gNewsStatus="NEWS: CLEAR";
+
+   if(gNewsBlocked && !gNewsWasBlocked)
+   {
+      Print("News blackout started: ",gNewsStatus);
+      FeatureApplyNewsOrderManagement();
+   }
+   else if(!gNewsBlocked && gNewsWasBlocked)
+      Print("News blackout ended. New entries enabled.");
+
+   gNewsWasBlocked=gNewsBlocked;
+}
+
+ENUM_TIMEFRAMES FeatureStageTimeframe(const int stage)
+{
+   if(stage<=0) return (Timeframe_Low==PERIOD_CURRENT ? _Period : Timeframe_Low);
+   if(stage==1) return (Timeframe_Stage1==PERIOD_CURRENT ? _Period : Timeframe_Stage1);
+   if(stage==2) return (Timeframe_Stage2==PERIOD_CURRENT ? _Period : Timeframe_Stage2);
+   return (Timeframe_Stage3==PERIOD_CURRENT ? _Period : Timeframe_Stage3);
+}
+
+void FeatureUpdateDrawdownTimeframe()
+{
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity<=0.0)
+   {
+      gActiveEntryTimeframe=(Timeframe_Low==PERIOD_CURRENT ? _Period : Timeframe_Low);
+      return;
+   }
+
+   if(gDDPeakEquity<=0.0 || equity>gDDPeakEquity)
+      gDDPeakEquity=equity;
+
+   gCurrentDDPct=(gDDPeakEquity>0.0 ? (gDDPeakEquity-equity)/gDDPeakEquity*100.0 : 0.0);
+   if(gCurrentDDPct<0.0) gCurrentDDPct=0.0;
+
+   if(!Use_DrawdownSwitch)
+   {
+      gDDStage=0;
+      gActiveEntryTimeframe=FeatureStageTimeframe(0);
+      return;
+   }
+
+   double d1=MathMax(DD_Stage1_Pct,0.0);
+   double d2=MathMax(DD_Stage2_Pct,d1);
+   double d3=MathMax(DD_Stage3_Pct,d2);
+
+   int desired=0;
+   if(gCurrentDDPct>=d3) desired=3;
+   else if(gCurrentDDPct>=d2) desired=2;
+   else if(gCurrentDDPct>=d1) desired=1;
+
+   if(desired>gDDStage)
+      gDDStage=desired;
+   else if(Auto_Switch_Back && desired<gDDStage)
+   {
+      double buffer=MathMax(DD_SwitchBack_Buffer_Pct,0.0);
+      while(gDDStage>desired)
+      {
+         double threshold=(gDDStage==3 ? d3 : (gDDStage==2 ? d2 : d1));
+         if(gCurrentDDPct < MathMax(threshold-buffer,0.0))
+            gDDStage--;
+         else
+            break;
+      }
+   }
+
+   gActiveEntryTimeframe=FeatureStageTimeframe(gDDStage);
+}
+
+void FeatureResetDailyTargetIfNeeded()
+{
+   int day=LegacyDayOfYear();
+   if(gDailyTargetDay!=day)
+   {
+      gDailyTargetDay=day;
+      gDailyTargetHandled=false;
+      gDailyTargetTradeBlocked=false;
+      gDailyTargetStartBalance=AccountInfoDouble(ACCOUNT_BALANCE);
+      gDailyTargetLastProfit=0.0;
+   }
+}
+
+double FeatureDailyTargetThreshold()
+{
+   if(Daily_Target_Mode==DAILY_TARGET_PERCENT)
+      return MathMax(gDailyTargetStartBalance,0.0)*MathMax(Daily_Target_Percent,0.0)/100.0;
+
+   return MathMax(Daily_Target,0.0);
+}
+
+void FeatureUpdateEntryBlock()
+{
+   gBlockNewEntries=false;
+
+   if(Use_Session_Filter && !gSessionAllowed)
+      gBlockNewEntries=true;
+
+   if(Filter_News && News_Stop_New_Trades && gNewsBlocked)
+      gBlockNewEntries=true;
+
+   if(gDailyTargetTradeBlocked)
+      gBlockNewEntries=true;
+}
+
+void FeatureUpdateStatus()
+{
+   string tf=EnumToString(gActiveEntryTimeframe);
+   string dd="DD: "+DoubleToString(gCurrentDDPct,2)+"%  STAGE "+IntegerToString(gDDStage)+"  TF "+tf;
+   string daily="DAILY: "+DoubleToString(gDailyTargetLastProfit,2)+
+                " / "+DoubleToString(FeatureDailyTargetThreshold(),2)+
+                (gDailyTargetTradeBlocked ? " BLOCKED" : "");
+   gFeatureStatus=dd+"\n"+gSessionStatus+"\n"+gNewsStatus+"\n"+daily+
+                  "\nENTRY: "+(gBlockNewEntries ? "BLOCKED" : "ENABLED");
+}
+
+void FeatureInitialize()
+{
+   gDDPeakEquity=MathMax(AccountInfoDouble(ACCOUNT_EQUITY),
+                         AccountInfoDouble(ACCOUNT_BALANCE));
+
+   gDDStage=0;
+   gActiveEntryTimeframe=FeatureStageTimeframe(0);
+   gSessionFinishBasket=false;
+   gNewsLastCheck=0;
+   gNewsBlocked=false;
+   gNewsWasBlocked=false;
+   gDailyTargetDay=-1;
+   FeatureResetDailyTargetIfNeeded();
+   gSessionAllowed=FeatureSessionAllowedNow();
+   FeatureUpdateEntryBlock();
+   FeatureUpdateStatus();
+}
+
+color SAC_RGB(const int r,const int g,const int b)
+{
+   int rr=MathMax(0,MathMin(255,r));
+   int gg=MathMax(0,MathMin(255,g));
+   int bb=MathMax(0,MathMin(255,b));
+
+   // MQL color storage: red in low byte, then green, then blue.
+   return (color)(rr | (gg << 8) | (bb << 16));
+}
+
+color SACColorBg()      { return SAC_RGB(18,14,28); }
+color SACColorPanel()      { return SAC_RGB(46,26,78); }
+color SACColorPanel2()      { return SAC_RGB(59,36,96); }
+color SACColorAccent()      { return SAC_RGB(191,241,255); }
+color SACColorLine()      { return SAC_RGB(120,214,255); }
+color SACColorText()      { return SAC_RGB(240,245,255); }
+color SACColorSoft()      { return SAC_RGB(184,196,225); }
+color SACColorBull()      { return SAC_RGB(160,255,228); }
+color SACColorBear()      { return SAC_RGB(255,177,218); }
+
+void SACDeleteObject(const string name)
+{
+   if(ObjectFind(0,name)>=0)
+      ObjectDelete(0,name);
+}
+
+void SACCreatePanel(const string name,const int x,const int y,const int w,const int h,const color bg,const color border)
+{
+   if(ObjectFind(0,name)<0)
+      ObjectCreate(0,name,OBJ_RECTANGLE_LABEL,0,0,0);
+
+   ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,name,OBJPROP_XSIZE,w);
+   ObjectSetInteger(0,name,OBJPROP_YSIZE,h);
+   ObjectSetInteger(0,name,OBJPROP_BGCOLOR,bg);
+   ObjectSetInteger(0,name,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,border);
+   ObjectSetInteger(0,name,OBJPROP_BACK,false);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
+   ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+   ObjectSetInteger(0,name,OBJPROP_ZORDER,0);
+}
+
+void SACCreateLabel(const string name,const int x,const int y,const int size,const string text,const color clr,const string font="Segoe UI")
+{
+   if(ObjectFind(0,name)<0)
+      ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+
+   ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   ObjectSetString(0,name,OBJPROP_TEXT,text);
+   ObjectSetString(0,name,OBJPROP_FONT,font);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,size);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,name,OBJPROP_BACK,false);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
+   ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+}
+
+void SACApplyTheme()
+{
+   ChartSetInteger(0,CHART_SHOW_GRID,true);
+   ChartSetInteger(0,CHART_COLOR_BACKGROUND,SACColorBg());
+   ChartSetInteger(0,CHART_COLOR_FOREGROUND,SACColorText());
+   ChartSetInteger(0,CHART_COLOR_GRID,SAC_RGB(70,54,100));
+   ChartSetInteger(0,CHART_COLOR_CHART_UP,SACColorBull());
+   ChartSetInteger(0,CHART_COLOR_CHART_DOWN,SACColorBear());
+   ChartSetInteger(0,CHART_COLOR_CANDLE_BULL,SACColorBull());
+   ChartSetInteger(0,CHART_COLOR_CANDLE_BEAR,SACColorBear());
+   ChartSetInteger(0,CHART_COLOR_VOLUME,SACColorLine());
+   ChartSetInteger(0,CHART_COLOR_BID,SACColorLine());
+   ChartSetInteger(0,CHART_COLOR_ASK,SAC_RGB(255,220,240));
+   ChartSetInteger(0,CHART_COLOR_STOP_LEVEL,SAC_RGB(255,110,170));
+}
+
+void SACRenderDashboard()
+{
+   SACApplyTheme();
+
+   string tf=EnumToString(gActiveEntryTimeframe);
+   double spread=LegacyMarketInfo(_Symbol,LEGACY_MODE_SPREAD);
+   double usedMargin=LegacyAccountMargin();
+   double freeMargin=LegacyAccountFreeMargin();
+   double eq=LegacyAccountEquity();
+   double bal=LegacyAccountBalance();
+   string dailyLine="Daily: "+DoubleToString(gDailyTargetLastProfit,2)+" / "+DoubleToString(FeatureDailyTargetThreshold(),2);
+   if(gDailyTargetTradeBlocked) dailyLine += " (paused)";
+
+   SACCreatePanel("SAC_PANEL_MAIN",8,8,370,206,SACColorPanel(),SACColorLine());
+   SACCreatePanel("SAC_PANEL_HEAD",8,8,370,42,SACColorPanel2(),SACColorAccent());
+   SACCreatePanel("SAC_PANEL_LOGO",18,16,38,28,SACColorBg(),SACColorLine());
+
+   SACCreateLabel("SAC_LOGO_A",26,13,18,"⚓",SACColorAccent(),"Segoe UI Symbol");
+   SACCreateLabel("SAC_TITLE",64,14,16,"SEA ANCHOR CREW",SACColorText(),"Segoe UI Semibold");
+   SACCreateLabel("SAC_SUB",64,32,8,"Mystic Ocean UI • Original Grid Logic",SACColorSoft(),"Segoe UI");
+
+   SACCreateLabel("SAC_ROW1",18,62,9,"Symbol: "+_Symbol+"   TF: "+tf+"   Spread: "+DoubleToString(spread,0),SACColorAccent(),"Consolas");
+   SACCreateLabel("SAC_ROW2",18,80,9,"Broker: "+LegacyAccountCompany(),SACColorText(),"Segoe UI");
+   SACCreateLabel("SAC_ROW3",18,98,9,"Account: "+(string)LegacyAccountNumber()+"   Leverage: 1:"+DoubleToString(LegacyAccountLeverage(),0),SACColorText(),"Consolas");
+   SACCreateLabel("SAC_ROW4",18,116,9,"Balance: "+DoubleToString(bal,2)+"   Equity: "+DoubleToString(eq,2),SACColorText(),"Consolas");
+   SACCreateLabel("SAC_ROW5",18,134,9,"Free Margin: "+DoubleToString(freeMargin,2)+"   Used: "+DoubleToString(usedMargin,2),SACColorText(),"Consolas");
+   SACCreateLabel("SAC_ROW6",18,152,9,"DD: "+DoubleToString(gCurrentDDPct,2)+"%   Stage: "+IntegerToString(gDDStage),SACColorAccent(),"Consolas");
+   SACCreateLabel("SAC_ROW7",18,170,9,gSessionStatus+"   |   "+dailyLine,SACColorSoft(),"Segoe UI");
+   SACCreateLabel("SAC_ROW8",18,188,8,gNewsStatus,SACColorSoft(),"Segoe UI");
+}
+
+void SACDeleteUI()
+{
+   string names[]={"SAC_PANEL_MAIN","SAC_PANEL_HEAD","SAC_PANEL_LOGO","SAC_LOGO_A","SAC_TITLE","SAC_SUB",
+                   "SAC_ROW1","SAC_ROW2","SAC_ROW3","SAC_ROW4","SAC_ROW5","SAC_ROW6","SAC_ROW7","SAC_ROW8","j","Copyright"};
+   for(int i=0;i<ArraySize(names);i++)
+      SACDeleteObject(names[i]);
 }
 
 bool HedgeLogicTradeWindowAllowed()
@@ -1122,7 +2051,7 @@ bool HedgeLogicDailyRangeAllowed()
    if(OpenRangePips<=0.0 || MaxDailyRange<=0.0)
       return true;
 
-   int bars=iBars(_Symbol,LegacyTimeframe(_Period));
+   int bars=iBars(_Symbol,LegacyTimeframe(0));
    if(bars<=0) return false;
 
    int today=LegacyDayOfYear();
@@ -1130,10 +2059,10 @@ bool HedgeLogicDailyRangeAllowed()
 
    for(int shift=0;shift<bars;shift++)
    {
-      datetime t=LegacyITime(_Symbol,_Period,shift);
+      datetime t=LegacyITime(_Symbol,0,shift);
       if(t<=0) break;
       if(LegacyTimeDayOfYear(t)!=today) break;
-      dayOpen=LegacyIOpen(_Symbol,_Period,shift);
+      dayOpen=LegacyIOpen(_Symbol,0,shift);
    }
 
    if(dayOpen<=0.0) return false;
@@ -1219,7 +2148,7 @@ bool HedgeLogicOpen(const int cmd,const double requestedLot)
    double lot=LegacyNormalizeVolume(_Symbol,requestedLot);
    if(lot<=0.0) return false;
 
-   string comment=_Symbol+"-Euro Scalper-HEDGE";
+   string comment=_Symbol+"-SeaAnchorCrew-HEDGE";
    int result=LegacyOrderSend(_Symbol,
                               cmd,
                               lot,
@@ -1329,6 +2258,10 @@ void HedgeLogicManage()
 
       HedgeLogicUpdateTP();
 
+      // News/session/daily-target filters block NEW hedge/grid entries,
+      // but existing hedge TP management above remains active.
+      if(gBlockNewEntries) return;
+
       // Original averaging behavior: same direction, adverse Step,
       // and (because the supplied source has I_b_20=true) only at
       // the very beginning of the current bar.
@@ -1349,8 +2282,8 @@ void HedgeLogicManage()
 
       if(!add) return;
 
-      // Same lot progression used by the supplied original multiplier mode.
-      double nextLot=Lot*MathPow(LotMultiplikator,hedgeCount);
+      // Same shared multiplier ladder used by the primary basket.
+      double nextLot=SACMultiplierLot(hedgeCount);
       if(HedgeLogicOpen(hedgeDirection,nextLot))
          HedgeLogicUpdateTP();
 
@@ -1366,6 +2299,9 @@ void HedgeLogicManage()
 
    int primaryDirection=(pBuyCount>0 ? LEGACY_OP_BUY : LEGACY_OP_SELL);
    int requiredHedgeDirection=(primaryDirection==LEGACY_OP_BUY ? LEGACY_OP_SELL : LEGACY_OP_BUY);
+
+   // Global entry filters apply to the first hedge too.
+   if(gBlockNewEntries) return;
 
    // Use the ORIGINAL first-entry filters and ORIGINAL direction signal.
    if(!HedgeLogicTradeWindowAllowed()) return;
@@ -1385,9 +2321,9 @@ void HedgeLogicManage()
 //|                                                                  |
 //+------------------------------------------------------------------+
 int LegacyInit() {
-   I_s_2 = "Euro Scalper";
+   I_s_2 = "Sea Anchor Crew";
    I_d_67 = 2;
-   I_s_3 = "Euro Scalper";
+   I_s_3 = "Sea Anchor Crew";
    I_i_129 = 1;
    I_s_4 = " MARTIN 1 - on. 2 - off.";
    I_i_98 = 1;
@@ -1716,43 +2652,27 @@ int LegacyStart() {
    return L_i_15;
    }
    */
-   ObjectCreate(0, "j", OBJ_LABEL, 0, 0, 0, 0, 0, 0, 0);
-   LegacyObjectSet("j", OBJPROP_CORNER, 4);
-   LegacyObjectSet("j", OBJPROP_XDISTANCE, 4);
-   LegacyObjectSet("j", OBJPROP_YDISTANCE, 10);
-   LegacyObjectSetText("j", "Euro Scalper NDD", 19, "Times New Roman Bold", 65280);
-   S_s_20 = "\nLisensi https://www.facebook.com/septi.fx.profit \n================================\nINFORMATION:\n  Nama Broker " + LegacyAccountCompany();
-   S_s_20 = S_s_20 + "\n";
-   S_s_20 = S_s_20 + "================================";
-   S_s_20 = S_s_20 + "\n";
-   S_s_20 = S_s_20 + "ACC INFORMATION:";
-   S_s_20 = S_s_20 + "\n";
-   S_s_20 = S_s_20 + "  Nomor Account :";
+   SACRenderDashboard();
+   S_s_20 = "\nSEA ANCHOR CREW\n==============================\nBROKER: " + LegacyAccountCompany();
+   S_s_20 = S_s_20 + "\nACCOUNT: ";
    S_s_21 = (string)LegacyAccountNumber();
    S_s_20 = S_s_20 + S_s_21;
-   S_s_20 = S_s_20 + "\n";
-   S_s_20 = S_s_20 + "  Account Leverage: ";
+   S_s_20 = S_s_20 + "\nLEVERAGE: 1:";
    S_s_20 = S_s_20 + DoubleToString(LegacyAccountLeverage(), 0);
-   S_s_20 = S_s_20 + "\n";
-   S_s_20 = S_s_20 + "  Mata Uang : ";
+   S_s_20 = S_s_20 + "\nCURRENCY: ";
    S_s_20 = S_s_20 + LegacyAccountCurrency();
-   S_s_20 = S_s_20 + "\n";
-   S_s_20 = S_s_20 + "  EQUITY: ";
+   S_s_20 = S_s_20 + "\nEQUITY: ";
    S_s_20 = S_s_20 + DoubleToString(LegacyAccountEquity(), 2);
-   S_s_20 = S_s_20 + "\n";
-   S_s_20 = S_s_20 + "  BALANCE:";
+   S_s_20 = S_s_20 + "\nBALANCE: ";
    S_s_20 = S_s_20 + DoubleToString(LegacyAccountBalance(), 2);
-   S_s_20 = S_s_20 + "\n";
-   S_s_20 = S_s_20 + "=================";
-   S_s_20 = S_s_20 + "\n";
-   S_s_20 = S_s_20 + "MARGIN INFORMATION:";
-   S_s_20 = S_s_20 + "\n";
-   S_s_20 = S_s_20 + "  Free Margin : ";
+   S_s_20 = S_s_20 + "\nFREE MARGIN: ";
    S_s_20 = S_s_20 + DoubleToString(LegacyAccountFreeMargin(), 2);
-   S_s_20 = S_s_20 + "\n";
-   S_s_20 = S_s_20 + "  Used Margin : ";
+   S_s_20 = S_s_20 + "\nUSED MARGIN: ";
    S_s_20 = S_s_20 + DoubleToString(LegacyAccountMargin(), 2);
-   Comment("\n ", S_s_20, "\n\n\n :: Spread: ", LegacyMarketInfo(_Symbol, LEGACY_MODE_SPREAD), "\n=================");
+   Comment("\n ", S_s_20,
+           "\n\nSPREAD: ", LegacyMarketInfo(_Symbol, LEGACY_MODE_SPREAD),
+           "\n------------------------------",
+           "\n",gFeatureStatus);
    L_d_0 = 0;
    L_d_1 = 0;
    L_d_2 = 0;
@@ -1763,12 +2683,13 @@ int LegacyStart() {
    L_d_5 = LegacyMarketInfo(_Symbol, LEGACY_MODE_BID);
    L_d_6 = LegacyMarketInfo(_Symbol, LEGACY_MODE_ASK);
    L_i_5 = (int)LegacyMarketInfo(_Symbol, LEGACY_MODE_DIGITS);
+   FeatureResetDailyTargetIfNeeded();
    if (Use_Daily_Target) {
       G_d_2 = 0;
       G_i_2 = LegacyHistoryTotal() - 1;
       if (G_i_2 >= 0) {
          do {
-            if (LegacyOrderSelect(G_i_2, 0, 1) && LegacyOrderMagicNumber() == I_i_0) {
+            if (LegacyOrderSelect(G_i_2, 0, 1) && FeatureIsManagedMagic(LegacyOrderMagicNumber())) {
                G_l_1 = LegacyOrderCloseTime();
                if (G_l_1 >= LegacyITime(_Symbol, 1440, 0) && LegacyOrderType() <= LEGACY_OP_SELL) {
                   G_d_33 = LegacyOrderProfit();
@@ -1779,29 +2700,39 @@ int LegacyStart() {
             G_i_2 = G_i_2 - 1;
          } while (G_i_2 >= 0);
       }
-      if ((G_d_2 >= Daily_Target)) {
-         G_i_70 = LegacyOrdersTotal() - 1;
-         G_i_3 = G_i_70;
-         if (G_i_70 >= 0) {
-            do {
-               I_b_7 = LegacyOrderSelect(G_i_3, 0, 0);
-               if (LegacyOrderSymbol() == _Symbol) {
-                  if (LegacyOrderSymbol() == _Symbol && LegacyOrderMagicNumber() == I_i_71) {
-                     if (LegacyOrderType() == LEGACY_OP_BUY) {
-                        I_b_7 = LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), gBid, (int)I_d_34, 16711680);
-                     }
-                     if (LegacyOrderType() == LEGACY_OP_SELL) {
-                        I_b_7 = LegacyOrderClose(LegacyOrderTicket(), LegacyOrderLots(), gAsk, (int)I_d_34, 255);
-                     }
-                  }
-                  Sleep(1000);
-               }
-               G_i_3 = G_i_3 - 1;
-            } while (G_i_3 >= 0);
+
+      gDailyTargetLastProfit=G_d_2;
+      double dailyTargetThreshold=FeatureDailyTargetThreshold();
+
+      if (dailyTargetThreshold>0.0 && G_d_2>=dailyTargetThreshold) {
+         // Handle the target only once per trading day.
+         if(!gDailyTargetHandled)
+         {
+            gDailyTargetHandled=true;
+            if(Close_Managed_Trades_At_Daily_Target)
+               FeatureCloseManagedPositions(false,0.0);
+
+            Print("Daily target reached. Realized=",DoubleToString(G_d_2,2),
+                  " target=",DoubleToString(dailyTargetThreshold,2),
+                  Stop_Trading_After_Daily_Target ? " -> paused until next day"
+                                                  : " -> target handled once; trading may continue");
+
+            if(Stop_Trading_After_Daily_Target)
+               gDailyTargetTradeBlocked=true;
+
+            FeatureUpdateEntryBlock();
+            FeatureUpdateStatus();
+
+            L_i_15=0;
+            return L_i_15; // do not reopen on the same tick as the target close
          }
-         Print("\nSelamat target harian tercapai");
-         L_i_15 = 0;
-         return L_i_15;
+
+         if(Stop_Trading_After_Daily_Target)
+         {
+            gDailyTargetTradeBlocked=true;
+            L_i_15=0;
+            return L_i_15;
+         }
       }
    }
    if (Hidden_TP) {
@@ -2181,7 +3112,7 @@ int LegacyStart() {
             f0_1(false, true);
             if (I_i_76 == -2) {
                if (I_i_77 == 1) {
-                  I_d_69 = NormalizeDouble((I_d_45 * L_d_1), (int)I_d_67);
+                  I_d_69 = SACMultiplierLot(I_i_88);
                } else {
                   I_d_69 = NormalizeDouble((Lot + L_d_1), (int)I_d_67);
                }
@@ -2196,8 +3127,7 @@ int LegacyStart() {
                }
                if (I_i_1 == 1) {
                   if (I_i_77 == 1) {
-                     returned_double = MathPow(I_d_45, I_i_90);
-                     G_d_10 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                     G_d_10 = SACMultiplierLot(I_i_88);
                   } else {
                      if (I_i_76 == -2) {
                         G_d_10 = NormalizeDouble(I_d_44, (int)I_d_67);
@@ -2244,7 +3174,7 @@ int LegacyStart() {
                I_d_69 = G_d_9;
             }
          }
-         if (I_b_24 && L_s_1 == "true") {
+         if (I_b_24 && L_s_1 == "true" && !gBlockNewEntries) {
             I_i_90 = I_i_88;
             if ((I_d_69 > 0)) {
                LegacyRefreshRates();
@@ -2288,7 +3218,7 @@ int LegacyStart() {
                f0_1(true, false);
                if (I_i_76 == -2) {
                   if (I_i_77 == 1) {
-                     I_d_69 = NormalizeDouble((I_d_45 * L_d_0), (int)I_d_67);
+                     I_d_69 = SACMultiplierLot(I_i_88);
                   } else {
                      I_d_69 = NormalizeDouble((Lot + L_d_0), (int)I_d_67);
                   }
@@ -2303,8 +3233,7 @@ int LegacyStart() {
                   }
                   if (I_i_1 == 1) {
                      if (I_i_77 == 1) {
-                        returned_double = MathPow(I_d_45, I_i_90);
-                        G_d_13 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                        G_d_13 = SACMultiplierLot(I_i_88);
                      } else {
                         if (I_i_76 == -2) {
                            G_d_13 = NormalizeDouble(I_d_44, (int)I_d_67);
@@ -2351,7 +3280,7 @@ int LegacyStart() {
                   I_d_69 = G_d_12;
                }
             }
-            if (I_b_24 && L_s_1 == "true") {
+            if (I_b_24 && L_s_1 == "true" && !gBlockNewEntries) {
                I_i_90 = I_i_88;
                if ((I_d_69 > 0)) {
                   S_s_14 = _Symbol + "-";
@@ -2397,10 +3326,10 @@ int LegacyStart() {
       G_i_44 = 0;
       if (gBars > 0) {
          do {
-            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, _Period, G_i_44)) == G_i_43) {
-               G_d_15 = LegacyIOpen(_Symbol, _Period, G_i_44);
+            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, 0, G_i_44)) == G_i_43) {
+               G_d_15 = LegacyIOpen(_Symbol, 0, G_i_44);
             }
-            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, _Period, G_i_44)) != G_i_43) break;
+            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, 0, G_i_44)) != G_i_43) break;
             G_i_44 = G_i_44 + 1;
          } while (G_i_44 < gBars);
       }
@@ -2410,10 +3339,10 @@ int LegacyStart() {
       G_i_46 = 0;
       if (gBars > 0) {
          do {
-            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, _Period, G_i_46)) == G_i_45) {
-               G_d_16 = LegacyIOpen(_Symbol, _Period, G_i_46);
+            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, 0, G_i_46)) == G_i_45) {
+               G_d_16 = LegacyIOpen(_Symbol, 0, G_i_46);
             }
-            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, _Period, G_i_46)) != G_i_45) break;
+            if (LegacyTimeDayOfYear(LegacyITime(_Symbol, 0, G_i_46)) != G_i_45) break;
             G_i_46 = G_i_46 + 1;
          } while (G_i_46 < gBars);
       }
@@ -2470,8 +3399,7 @@ int LegacyStart() {
                         }
                         if (I_i_1 == 1) {
                            if (I_i_77 == 1) {
-                              returned_double = MathPow(I_d_45, I_i_90);
-                              G_d_18 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                              G_d_18 = SACMultiplierLot(I_i_88);
                            } else {
                               if (I_i_76 == -2) {
                                  G_d_18 = NormalizeDouble(I_d_44, (int)I_d_67);
@@ -2560,8 +3488,7 @@ int LegacyStart() {
                         }
                         if (I_i_1 == 1) {
                            if (I_i_77 == 1) {
-                              returned_double = MathPow(I_d_45, I_i_90);
-                              G_d_21 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                              G_d_21 = SACMultiplierLot(I_i_88);
                            } else {
                               if (I_i_76 == -2) {
                                  G_d_21 = NormalizeDouble(I_d_44, (int)I_d_67);
@@ -2699,8 +3626,7 @@ int LegacyStart() {
                      }
                      if (I_i_1 == 1) {
                         if (I_i_77 == 1) {
-                           returned_double = MathPow(I_d_45, I_i_90);
-                           G_d_24 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                           G_d_24 = SACMultiplierLot(I_i_88);
                         } else {
                            if (I_i_76 == -2) {
                               G_d_24 = NormalizeDouble(I_d_44, (int)I_d_67);
@@ -2789,8 +3715,7 @@ int LegacyStart() {
                      }
                      if (I_i_1 == 1) {
                         if (I_i_77 == 1) {
-                           returned_double = MathPow(I_d_45, I_i_90);
-                           G_d_27 = NormalizeDouble((I_d_44 * returned_double), (int)I_d_67);
+                           G_d_27 = SACMultiplierLot(I_i_88);
                         } else {
                            if (I_i_76 == -2) {
                               G_d_27 = NormalizeDouble(I_d_44, (int)I_d_67);
@@ -3429,8 +4354,8 @@ int OnInit()
    if(!LegacyRefreshRates())
       Print("Warning: initial market data is not available yet; the EA will refresh it on the first tick.");
 
-   if(Filter_Sideway || Filter_News || invisible_mode)
-      Print("Compatibility note: Filter_Sideway, Filter_News and invisible_mode are declared in the supplied source but have no executable implementation there; the MT5 port retains the inputs without inventing new behavior.");
+   if(Filter_Sideway || invisible_mode)
+      Print("Compatibility note: Filter_Sideway and invisible_mode remain source-compatible placeholders. Filter_News is now implemented with the native MT5 Economic Calendar.");
 
    int rc=LegacyInit();
    // Source initializes this working magic later in start(); set it immediately so
@@ -3438,20 +4363,59 @@ int OnInit()
    I_i_71=I_i_0;
    gLegacyOpenHour=(Open_Hour==24 ? 0 : Open_Hour);
    gLegacyCloseHour=(Close_Hour==24 ? 0 : Close_Hour);
+
+   FeatureInitialize();
+   FeatureUpdateDrawdownTimeframe();
+   LegacyRefreshRates();
+   gSessionAllowed=FeatureSessionAllowedNow();
+   FeatureUpdateNews();
+   FeatureUpdateEntryBlock();
+   FeatureUpdateStatus();
+
    return (rc==0 ? INIT_SUCCEEDED : INIT_FAILED);
 }
 
 void OnTick()
 {
+   FeatureResetDailyTargetIfNeeded();
+   FeatureUpdateDrawdownTimeframe();
+
    if(!LegacyRefreshRates()) return;
+
    I_i_71=I_i_0;
    gLegacyOpenHour=(Open_Hour==24 ? 0 : Open_Hour);
    gLegacyCloseHour=(Close_Hour==24 ? 0 : Close_Hour);
+
+   gSessionAllowed=FeatureSessionAllowedNow();
+
+   // If the regular session has ended but an existing basket is still active,
+   // keep the original strategy active until combined basket profit reaches the
+   // configured close target, then clear it and switch the session OFF.
+   FeatureManageSessionFinishBasket();
+
+   // Closing the basket above can change the session from FINISH BASKET to OFF.
+   gSessionAllowed=FeatureSessionAllowedNow();
+
+   FeatureUpdateNews();
+   FeatureUpdateEntryBlock();
+   FeatureUpdateStatus();
+
    LegacyStart();
+
+   // Daily target may have changed the block state inside LegacyStart().
+   FeatureUpdateEntryBlock();
+   FeatureUpdateStatus();
+
    HedgeLogicManage();
+
+   FeatureManageSessionFinishBasket();
+   gSessionAllowed=FeatureSessionAllowedNow();
+   FeatureUpdateEntryBlock();
+   FeatureUpdateStatus();
 }
 
 void OnDeinit(const int reason)
 {
+   SACDeleteUI();
    LegacyDeinit();
 }
