@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "2023, lengockhanhhai - MQL5 conversion"
 #property link      "lengockhanhhai@gmail.com"
-#property version   "2.25"
+#property version   "2.26"
 #property description "Sea Anchor Crew native MQL5 conversion"
 #property description "Legacy entry/grid hedge + 3-stage DD timeframe, news/session filters and configurable daily target."
 
@@ -45,6 +45,16 @@ input ENUM_TIMEFRAMES Timeframe_Stage2          = PERIOD_M30;
 input ENUM_TIMEFRAMES Timeframe_Stage3          = PERIOD_H1;
 input bool            Auto_Switch_Back          = true;
 input double          DD_SwitchBack_Buffer_Pct  = 2.0;
+
+input group "=== Drawdown Recovery Basket Exit ==="
+input bool            Use_DD_Recovery_Exit       = true;
+input double          DD_Recovery_Trigger1       = 30.0;
+input double          DD_Recovery_CloseAt1       = 0.0;
+input double          DD_Recovery_Trigger2       = 35.0;
+input double          DD_Recovery_CloseAt2       = 5.0;
+input double          DD_Recovery_Trigger3       = 40.0;
+input double          DD_Recovery_CloseAt3       = 10.0;
+input bool            DD_Recovery_Delete_Pending = true;
 
 input group "=== News Filter - MT5 Economic Calendar ==="
 input bool                    Filter_News                    = true;
@@ -144,6 +154,10 @@ ENUM_TIMEFRAMES gActiveEntryTimeframe=PERIOD_CURRENT;
 double   gDDPeakEquity=0.0;
 double   gCurrentDDPct=0.0;
 int      gDDStage=0;
+
+int      gDDRecoveryStage=0;
+double   gDDRecoveryTargetPct=0.0;
+bool     gDDRecoveryClosing=false;
 
 bool     gSessionAllowed=true;
 string   gSessionStatus="SESSION: OFF";
@@ -1785,6 +1799,83 @@ ENUM_TIMEFRAMES FeatureStageTimeframe(const int stage)
    return (Timeframe_Stage3==PERIOD_CURRENT ? _Period : Timeframe_Stage3);
 }
 
+void FeatureResetDDRecoveryExit()
+{
+   gDDRecoveryStage=0;
+   gDDRecoveryTargetPct=0.0;
+   gDDRecoveryClosing=false;
+}
+
+void FeatureCloseDDRecoveryBasket()
+{
+   if(gDDRecoveryClosing) return;
+
+   gDDRecoveryClosing=true;
+
+   if(DD_Recovery_Delete_Pending)
+      FeatureDeleteManagedPendingOrders();
+
+   FeatureCloseManagedPositions(false,0.0);
+}
+
+void FeatureUpdateDDRecoveryExit()
+{
+   if(!Use_DD_Recovery_Exit)
+   {
+      FeatureResetDDRecoveryExit();
+      return;
+   }
+
+   int managed=FeatureManagedTradeCount();
+
+   // Start a fresh DD cycle only after the managed basket is completely clear.
+   if(managed<=0)
+   {
+      if(gDDRecoveryStage>0 || gDDRecoveryClosing)
+      {
+         FeatureResetDDRecoveryExit();
+
+         double eq=AccountInfoDouble(ACCOUNT_EQUITY);
+         if(eq>0.0)
+            gDDPeakEquity=eq;
+
+         gCurrentDDPct=0.0;
+      }
+      return;
+   }
+
+   // Highest reached stage remains latched.
+   if(gCurrentDDPct>=MathMax(DD_Recovery_Trigger3,0.0))
+   {
+      gDDRecoveryStage=3;
+      gDDRecoveryTargetPct=MathMax(DD_Recovery_CloseAt3,0.0);
+   }
+   else if(gDDRecoveryStage<3 &&
+           gCurrentDDPct>=MathMax(DD_Recovery_Trigger2,0.0))
+   {
+      gDDRecoveryStage=2;
+      gDDRecoveryTargetPct=MathMax(DD_Recovery_CloseAt2,0.0);
+   }
+   else if(gDDRecoveryStage<2 &&
+           gCurrentDDPct>=MathMax(DD_Recovery_Trigger1,0.0))
+   {
+      gDDRecoveryStage=1;
+      gDDRecoveryTargetPct=MathMax(DD_Recovery_CloseAt1,0.0);
+   }
+
+   if(gDDRecoveryStage<=0) return;
+
+   // Example: touched 35% DD -> wait until DD recovers to <=5%, then close all.
+   if(gCurrentDDPct<=gDDRecoveryTargetPct)
+   {
+      Print("DD recovery exit. stage=",gDDRecoveryStage,
+            " currentDD=",DoubleToString(gCurrentDDPct,2),"%",
+            " closeAt=",DoubleToString(gDDRecoveryTargetPct,2),"%. Closing basket.");
+
+      FeatureCloseDDRecoveryBasket();
+   }
+}
+
 void FeatureUpdateDrawdownTimeframe()
 {
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
@@ -1873,6 +1964,9 @@ void FeatureUpdateStatus()
 {
    string tf=EnumToString(gActiveEntryTimeframe);
    string dd="DD: "+DoubleToString(gCurrentDDPct,2)+"%  STAGE "+IntegerToString(gDDStage)+"  TF "+tf;
+   if(gDDRecoveryStage>0)
+      dd += "  RECOVERY "+IntegerToString(gDDRecoveryStage)
+            +" -> "+DoubleToString(gDDRecoveryTargetPct,2)+"%";
    string daily="DAILY: "+DoubleToString(gDailyTargetLastProfit,2)+
                 " / "+DoubleToString(FeatureDailyTargetThreshold(),2)+
                 (gDailyTargetTradeBlocked ? " BLOCKED" : "");
@@ -1886,6 +1980,7 @@ void FeatureInitialize()
                          AccountInfoDouble(ACCOUNT_BALANCE));
 
    gDDStage=0;
+   FeatureResetDDRecoveryExit();
    gActiveEntryTimeframe=FeatureStageTimeframe(0);
    gSessionFinishBasket=false;
    gNewsLastCheck=0;
@@ -4379,6 +4474,7 @@ void OnTick()
 {
    FeatureResetDailyTargetIfNeeded();
    FeatureUpdateDrawdownTimeframe();
+   FeatureUpdateDDRecoveryExit();
 
    if(!LegacyRefreshRates()) return;
 
@@ -4409,6 +4505,10 @@ void OnTick()
    HedgeLogicManage();
 
    FeatureManageSessionFinishBasket();
+
+   FeatureUpdateDrawdownTimeframe();
+   FeatureUpdateDDRecoveryExit();
+
    gSessionAllowed=FeatureSessionAllowedNow();
    FeatureUpdateEntryBlock();
    FeatureUpdateStatus();
